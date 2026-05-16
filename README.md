@@ -13,7 +13,7 @@ Claude AI to validate ambiguous setups before placing orders.
 | `bot.py` | Main bot — run this every morning |
 | `journal.py` | SQLite trade journal + P&L tracker |
 | `dashboard.py` | Live terminal UI (run in second terminal) |
-| `web_dashboard.py` | Browser monitor with intraday charting |
+| `web_dashboard.py` | Browser trading terminal with Kite market data |
 | `backtest.py` | Test strategy on historical Kite data |
 | `setup.py` | First-time setup wizard |
 
@@ -41,13 +41,16 @@ python journal.py
 python backtest.py --symbol RELIANCE --days 30
 ```
 
-Open the browser monitor at `http://127.0.0.1:5050`. It reads local
-`trades.db` and `bot.log` at runtime and renders candles with TradingView
-Lightweight Charts. Minute and hourly intervals use Zerodha Kite data when
-`bot.py` credentials and today's `.access_token` are available; otherwise the
-monitor labels the chart as demo candles so you can still test the interface.
-Runtime databases, logs, access tokens, CSV exports, and generated reports are
-ignored by Git.
+Open the browser terminal at `http://127.0.0.1:5050`. It reads local
+`trades.db` and `bot.log` at runtime, renders Kite historical candles with
+TradingView Lightweight Charts, and loads live watchlist quotes, market depth,
+positions, orders, and equity margins from Zerodha Kite. It does not generate
+fallback prices. If Kite credentials or today's `.access_token` are missing,
+market panels show a Kite connection error instead of prices. The dashboard can
+read credentials from `bot.py` or from `KITE_API_KEY` / `ZERODHA_API_KEY`, and
+can read an access token from `.access_token`, `KITE_ACCESS_TOKEN`, or
+`ZERODHA_ACCESS_TOKEN`. Runtime databases, logs, access tokens, CSV exports,
+and generated reports are ignored by Git.
 
 ---
 

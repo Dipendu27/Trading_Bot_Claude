@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
-import math
 import os
 import re
 import sqlite3
@@ -33,39 +32,41 @@ DB_FILE = PROJECT_ROOT / "trades.db"
 LOG_FILE = PROJECT_ROOT / "bot.log"
 BOT_FILE = PROJECT_ROOT / "bot.py"
 ACCESS_TOKEN_FILE = PROJECT_ROOT / ".access_token"
+ENV_KEYS = {
+    "api_key": ("KITE_API_KEY", "ZERODHA_API_KEY"),
+    "api_secret": ("KITE_API_SECRET", "ZERODHA_API_SECRET"),
+}
 
 WATCHLIST = [
-    {"label": "RELIANCE", "symbol": "RELIANCE"},
-    {"label": "TCS", "symbol": "TCS"},
-    {"label": "HDFCBANK", "symbol": "HDFCBANK"},
-    {"label": "INFY", "symbol": "INFY"},
-    {"label": "ICICIBANK", "symbol": "ICICIBANK"},
-    {"label": "SBIN", "symbol": "SBIN"},
-    {"label": "ITC", "symbol": "ITC"},
-    {"label": "LT", "symbol": "LT"},
+    {"label": "NIFTY", "symbol": "NIFTY 50", "exchange": "NSE", "instrument": "NSE:NIFTY 50"},
+    {"label": "BANKNIFTY", "symbol": "NIFTY BANK", "exchange": "NSE", "instrument": "NSE:NIFTY BANK"},
+    {"label": "RELIANCE", "symbol": "RELIANCE", "exchange": "NSE", "instrument": "NSE:RELIANCE"},
+    {"label": "TCS", "symbol": "TCS", "exchange": "NSE", "instrument": "NSE:TCS"},
+    {"label": "HDFCBANK", "symbol": "HDFCBANK", "exchange": "NSE", "instrument": "NSE:HDFCBANK"},
+    {"label": "INFY", "symbol": "INFY", "exchange": "NSE", "instrument": "NSE:INFY"},
+    {"label": "ICICIBANK", "symbol": "ICICIBANK", "exchange": "NSE", "instrument": "NSE:ICICIBANK"},
+    {"label": "SBIN", "symbol": "SBIN", "exchange": "NSE", "instrument": "NSE:SBIN"},
+    {"label": "ITC", "symbol": "ITC", "exchange": "NSE", "instrument": "NSE:ITC"},
+    {"label": "LT", "symbol": "LT", "exchange": "NSE", "instrument": "NSE:LT"},
 ]
 
 app = Flask(__name__)
 _instrument_token_cache: dict[str, int] = {}
 
 INTERVALS = {
-    "1m": {"kite": "minute", "days": 1, "step_minutes": 1, "points": 180},
-    "5m": {"kite": "5minute", "days": 5, "step_minutes": 5, "points": 180},
-    "15m": {"kite": "15minute", "days": 10, "step_minutes": 15, "points": 160},
-    "1h": {"kite": "60minute", "days": 30, "step_minutes": 60, "points": 120},
-    "1D": {"kite": "day", "days": 180, "step_minutes": 1440, "points": 120},
+    "1m": {"kite": "minute", "days": 1, "points": 240},
+    "3m": {"kite": "3minute", "days": 3, "points": 220},
+    "5m": {"kite": "5minute", "days": 5, "points": 220},
+    "10m": {"kite": "10minute", "days": 10, "points": 180},
+    "15m": {"kite": "15minute", "days": 15, "points": 180},
+    "30m": {"kite": "30minute", "days": 30, "points": 160},
+    "1h": {"kite": "60minute", "days": 45, "points": 150},
+    "1D": {"kite": "day", "days": 220, "points": 160},
 }
 
-BASE_PRICES = {
-    "RELIANCE": 2900,
-    "TCS": 3900,
-    "HDFCBANK": 1700,
-    "INFY": 1800,
-    "ICICIBANK": 1200,
-    "SBIN": 800,
-    "ITC": 480,
-    "LT": 3700,
-}
+
+class MarketDataError(RuntimeError):
+    """Raised when live broker market data cannot be loaded."""
 
 
 def _connect() -> sqlite3.Connection | None:
@@ -110,6 +111,10 @@ def _bot_text() -> str:
 
 
 def _bot_cfg_value(key: str) -> str | None:
+    for env_key in ENV_KEYS.get(key, ()):
+        value = os.getenv(env_key)
+        if value:
+            return value.strip()
     match = re.search(rf'"{re.escape(key)}"\s*:\s*([^,\n#]+)', _bot_text())
     if not match:
         return None
@@ -117,6 +122,9 @@ def _bot_cfg_value(key: str) -> str | None:
 
 
 def _saved_access_token() -> str | None:
+    env_token = os.getenv("KITE_ACCESS_TOKEN") or os.getenv("ZERODHA_ACCESS_TOKEN")
+    if env_token:
+        return env_token.strip()
     if not ACCESS_TOKEN_FILE.exists():
         return None
     try:
@@ -128,11 +136,33 @@ def _saved_access_token() -> str | None:
     return token
 
 
+def _kite_status() -> dict[str, Any]:
+    api_key = _bot_cfg_value("api_key")
+    has_key = bool(api_key and not api_key.startswith("YOUR_"))
+    token = _saved_access_token()
+    if not has_key:
+        reason = "Zerodha api_key is not configured in bot.py"
+    elif not token:
+        reason = f"No Zerodha access token for {_today_ist().isoformat()}"
+    else:
+        reason = "Kite token available"
+    return {
+        "configured": has_key,
+        "token": token is not None,
+        "connected": has_key and token is not None,
+        "reason": reason,
+    }
+
+
 def _kite_client():
     api_key = _bot_cfg_value("api_key")
     access_token = _saved_access_token()
-    if not api_key or api_key.startswith("YOUR_") or not access_token:
-        return None
+    if not api_key or api_key.startswith("YOUR_"):
+        raise MarketDataError("Zerodha api_key is not configured in bot.py")
+    if not access_token:
+        raise MarketDataError(
+            f"No Zerodha access token for {_today_ist().isoformat()}. Run python bot.py and complete Kite login."
+        )
     from kiteconnect import KiteConnect
 
     kite = KiteConnect(api_key=api_key)
@@ -152,18 +182,79 @@ def _kite_instrument_token(kite, symbol: str) -> int | None:
     return None
 
 
-def _kite_candles(symbol: str, interval: str) -> dict[str, Any] | None:
+def _watchlist_item(symbol: str) -> dict[str, Any] | None:
+    for item in WATCHLIST:
+        if item["symbol"] == symbol:
+            return item
+    return None
+
+
+def _serialise_time(value: Any) -> Any:
+    if isinstance(value, (dt.datetime, dt.date)):
+        return value.isoformat()
+    return value
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {str(key): _json_safe(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return _serialise_time(value)
+
+
+def _quote_rows(kite, symbols: list[str] | None = None) -> list[dict[str, Any]]:
+    selected = [item for item in WATCHLIST if symbols is None or item["symbol"] in symbols]
+    if not selected:
+        return []
+
+    quotes = kite.quote([item["instrument"] for item in selected])
+    rows = []
+    for item in selected:
+        raw = quotes.get(item["instrument"], {})
+        ohlc = raw.get("ohlc") or {}
+        last_price = _money(raw.get("last_price"))
+        previous_close = _money(ohlc.get("close"))
+        change = round(last_price - previous_close, 2) if previous_close else _money(raw.get("net_change"))
+        change_pct = round(change / previous_close * 100, 2) if previous_close else 0.0
+        rows.append({
+            "label": item["label"],
+            "symbol": item["symbol"],
+            "exchange": item["exchange"],
+            "instrument": item["instrument"],
+            "last_price": last_price,
+            "last_quantity": int(raw.get("last_quantity") or 0),
+            "average_price": _money(raw.get("average_price")),
+            "volume": int(raw.get("volume") or 0),
+            "buy_quantity": int(raw.get("buy_quantity") or 0),
+            "sell_quantity": int(raw.get("sell_quantity") or 0),
+            "open": _money(ohlc.get("open")),
+            "high": _money(ohlc.get("high")),
+            "low": _money(ohlc.get("low")),
+            "close": previous_close,
+            "change": change,
+            "change_pct": change_pct,
+            "oi": int(raw.get("oi") or 0),
+            "timestamp": _serialise_time(raw.get("timestamp")),
+            "last_trade_time": _serialise_time(raw.get("last_trade_time")),
+            "depth": _json_safe(raw.get("depth") or {"buy": [], "sell": []}),
+        })
+    return rows
+
+
+def _kite_candles(symbol: str, interval: str) -> dict[str, Any]:
     kite = _kite_client()
-    if kite is None:
-        return None
     meta = INTERVALS.get(interval, INTERVALS["5m"])
     token = _kite_instrument_token(kite, symbol)
     if token is None:
-        return None
+        raise MarketDataError(f"Instrument token not found for NSE:{symbol}")
 
     to_dt = dt.datetime.now(ZoneInfo("Asia/Kolkata")) if ZoneInfo else dt.datetime.now()
     from_dt = to_dt - dt.timedelta(days=meta["days"])
     rows = kite.historical_data(token, from_dt, to_dt, meta["kite"])
+    if not rows:
+        raise MarketDataError(f"Kite returned no historical candles for NSE:{symbol}")
+
     candles = []
     for row in rows[-meta["points"]:]:
         when = row["date"]
@@ -182,47 +273,8 @@ def _kite_candles(symbol: str, interval: str) -> dict[str, Any] | None:
         "symbol": symbol,
         "interval": interval,
         "source": "kite",
+        "asof": to_dt.isoformat(),
         "message": "Zerodha Kite historical candles",
-        "candles": candles,
-    }
-
-
-def _demo_candles(symbol: str, interval: str) -> dict[str, Any]:
-    meta = INTERVALS.get(interval, INTERVALS["5m"])
-    points = meta["points"]
-    step = meta["step_minutes"]
-    base = BASE_PRICES.get(symbol, 1000)
-    now = dt.datetime.now(ZoneInfo("Asia/Kolkata")) if ZoneInfo else dt.datetime.now()
-    if interval == "1D":
-        start = (now - dt.timedelta(days=points)).replace(hour=15, minute=30, second=0, microsecond=0)
-    else:
-        start = now - dt.timedelta(minutes=points * step)
-
-    candles = []
-    previous = float(base)
-    symbol_seed = sum(ord(ch) for ch in symbol)
-    for idx in range(points):
-        current_time = start + dt.timedelta(days=idx if interval == "1D" else 0,
-                                           minutes=0 if interval == "1D" else idx * step)
-        wave = math.sin((idx + symbol_seed) / 7.0) * 0.0025
-        drift = math.sin((idx + symbol_seed) / 29.0) * 0.0012
-        close = max(previous * (1 + wave + drift), 1)
-        open_ = previous
-        high = max(open_, close) * (1 + 0.0018 + abs(math.sin(idx)) * 0.0015)
-        low = min(open_, close) * (1 - 0.0018 - abs(math.cos(idx)) * 0.0015)
-        previous = close
-        candles.append({
-            "time": int(current_time.timestamp()),
-            "open": round(open_, 2),
-            "high": round(high, 2),
-            "low": round(low, 2),
-            "close": round(close, 2),
-        })
-    return {
-        "symbol": symbol,
-        "interval": interval,
-        "source": "demo",
-        "message": "Demo candles. Configure bot.py and today's .access_token for Kite intraday data.",
         "candles": candles,
     }
 
@@ -351,6 +403,7 @@ def build_overview() -> dict[str, Any]:
         "logs": _tail_log(),
         "market": _market_status(),
         "bot": _read_bot_config(),
+        "kite": _kite_status(),
         "watchlist": WATCHLIST,
     }
 
@@ -461,18 +514,117 @@ def api_candles():
 
     try:
         data = _kite_candles(symbol, interval)
+    except MarketDataError as exc:
+        return jsonify({
+            "error": str(exc),
+            "source": "kite",
+            "kite": _kite_status(),
+            "candles": [],
+        }), 503
     except Exception as exc:
-        data = None
-        message = f"Kite data unavailable: {exc}"
-    else:
-        message = None
-
-    if data is None:
-        data = _demo_candles(symbol, interval)
-        if message:
-            data["message"] = f"{message}. Showing demo candles."
+        return jsonify({
+            "error": f"Kite data unavailable: {exc}",
+            "source": "kite",
+            "kite": _kite_status(),
+            "candles": [],
+        }), 502
 
     return jsonify(data)
+
+
+@app.route("/api/quotes")
+def api_quotes():
+    requested = [item.strip().upper() for item in request.args.get("symbols", "").split(",") if item.strip()]
+    try:
+        rows = _quote_rows(_kite_client(), requested or None)
+    except MarketDataError as exc:
+        return jsonify({
+            "error": str(exc),
+            "source": "kite",
+            "kite": _kite_status(),
+            "quotes": [],
+        }), 503
+    except Exception as exc:
+        return jsonify({
+            "error": f"Kite quotes unavailable: {exc}",
+            "source": "kite",
+            "kite": _kite_status(),
+            "quotes": [],
+        }), 502
+
+    return jsonify({
+        "source": "kite",
+        "kite": _kite_status(),
+        "quotes": rows,
+        "asof": (dt.datetime.now(ZoneInfo("Asia/Kolkata")) if ZoneInfo else dt.datetime.now()).isoformat(),
+    })
+
+
+@app.route("/api/depth")
+def api_depth():
+    symbol = request.args.get("symbol", WATCHLIST[0]["symbol"]).upper()
+    if _watchlist_item(symbol) is None:
+        return jsonify({"error": "Unsupported symbol"}), 400
+    try:
+        rows = _quote_rows(_kite_client(), [symbol])
+    except MarketDataError as exc:
+        return jsonify({
+            "error": str(exc),
+            "source": "kite",
+            "kite": _kite_status(),
+            "depth": {"buy": [], "sell": []},
+        }), 503
+    except Exception as exc:
+        return jsonify({
+            "error": f"Kite depth unavailable: {exc}",
+            "source": "kite",
+            "kite": _kite_status(),
+            "depth": {"buy": [], "sell": []},
+        }), 502
+
+    quote = rows[0] if rows else {}
+    return jsonify({
+        "source": "kite",
+        "kite": _kite_status(),
+        "symbol": symbol,
+        "quote": quote,
+        "depth": quote.get("depth") or {"buy": [], "sell": []},
+    })
+
+
+@app.route("/api/broker")
+def api_broker():
+    try:
+        kite = _kite_client()
+        positions = kite.positions()
+        orders = kite.orders()
+        margins = kite.margins("equity")
+    except MarketDataError as exc:
+        return jsonify({
+            "error": str(exc),
+            "source": "kite",
+            "kite": _kite_status(),
+            "positions": {"day": [], "net": []},
+            "orders": [],
+            "margins": {},
+        }), 503
+    except Exception as exc:
+        return jsonify({
+            "error": f"Kite broker data unavailable: {exc}",
+            "source": "kite",
+            "kite": _kite_status(),
+            "positions": {"day": [], "net": []},
+            "orders": [],
+            "margins": {},
+        }), 502
+
+    return jsonify({
+        "source": "kite",
+        "kite": _kite_status(),
+        "positions": _json_safe(positions),
+        "orders": _json_safe(orders[-50:]),
+        "margins": _json_safe(margins),
+    })
 
 
 @app.route("/api/health")
@@ -483,6 +635,7 @@ def api_health():
             "database": DB_FILE.exists(),
             "log": LOG_FILE.exists(),
             "kite_token": _saved_access_token() is not None,
+            "kite": _kite_status(),
             "market": _market_status(),
         }
     )
