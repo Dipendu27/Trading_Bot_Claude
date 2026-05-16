@@ -56,6 +56,10 @@ there, open the Kite login URL, paste the `request_token`, and the dashboard
 will save today's access token locally. Runtime databases, `.env`, access
 tokens, logs, CSV exports, and generated reports are ignored by Git.
 
+Chart controls include candlestick/bar/line/area modes, dark/light/contrast
+themes, volume, EMA 9, SMA 20, SMA 50, VWAP, grid/crosshair toggles, log scale,
+auto refresh, reset view, and fullscreen.
+
 ---
 
 ## Architecture

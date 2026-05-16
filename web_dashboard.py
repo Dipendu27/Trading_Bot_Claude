@@ -316,6 +316,7 @@ def _kite_candles(symbol: str, interval: str) -> dict[str, Any]:
             "high": _money(row["high"]),
             "low": _money(row["low"]),
             "close": _money(row["close"]),
+            "volume": int(row.get("volume") or 0),
         })
     return {
         "symbol": symbol,
