@@ -350,6 +350,21 @@ def dual_signal(r1, p1, a1, r5, p5, a5, r15, regime) -> str:
     if s1s >= thr or (r5 is not None and s5s >= thr): return "SELL"
     return "HOLD"
 
+
+def trailing_stop(position: Dict[str, Any], current_premium: float,
+                  trigger_pct: float) -> None:
+    """Raise stop-loss once an option premium moves enough in favour."""
+    entry = position.get("fill_price", 0)
+    if not entry:
+        return
+    pct = (current_premium - entry) / entry
+    if pct <= trigger_pct:
+        return
+
+    new_sl = round(entry * (1 + trigger_pct * 0.5), 2)
+    if new_sl > position["sl"]:
+        position["sl"] = new_sl
+
 # ══════════════════════════════════════════════════════════
 #  BACKTEST ENGINE
 # ══════════════════════════════════════════════════════════
@@ -420,7 +435,6 @@ def run_backtest(df1: pd.DataFrame, df5: pd.DataFrame, df15: pd.DataFrame,
         if position:
             iv      = iv_ce if position["direction"] == "CE" else iv_pe
             cur_p   = bar_premium(spot, strike, ts, expiry, iv, position["direction"])
-            pct     = (cur_p - position["fill_price"]) / position["fill_price"]
 
             # Scaled exit at 1:1
             if (BT["scale_exit"] and not position.get("scaled_out")
@@ -435,12 +449,7 @@ def run_backtest(df1: pd.DataFrame, df5: pd.DataFrame, df15: pd.DataFrame,
                 position["qty"] -= half_qty
                 position["scaled_out"] = True
 
-            # Trailing SL
-            trig = rp["trail_trigger_pct"]
-            if pct > trig:
-                new_sl = round(position["fill_price"] * (1 + trig * 0.5), 2)
-                if new_sl > position["sl"]:
-                    position["sl"] = new_sl
+            trailing_stop(position, cur_p, rp["trail_trigger_pct"])
 
             reason = exit_p = None
             if cur_p <= position["sl"]:
