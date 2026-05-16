@@ -3,7 +3,7 @@
 Web monitor for the main Trade Claude bot.
 
 This does not place orders. It reads the local journal database and bot log,
-then renders a browser dashboard with a TradingView chart widget.
+then renders a browser dashboard with TradingView Lightweight Charts.
 
 Run:
     python web_dashboard.py
@@ -13,13 +13,14 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import math
 import os
 import re
 import sqlite3
 from pathlib import Path
 from typing import Any
 
-from flask import Flask, jsonify, render_template
+from flask import Flask, jsonify, render_template, request
 
 try:
     from zoneinfo import ZoneInfo
@@ -31,19 +32,40 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DB_FILE = PROJECT_ROOT / "trades.db"
 LOG_FILE = PROJECT_ROOT / "bot.log"
 BOT_FILE = PROJECT_ROOT / "bot.py"
+ACCESS_TOKEN_FILE = PROJECT_ROOT / ".access_token"
 
 WATCHLIST = [
-    {"label": "RELIANCE", "tv": "BSE:RELIANCE"},
-    {"label": "TCS", "tv": "BSE:TCS"},
-    {"label": "HDFCBANK", "tv": "BSE:HDFCBANK"},
-    {"label": "INFY", "tv": "BSE:INFY"},
-    {"label": "ICICIBANK", "tv": "BSE:ICICIBANK"},
-    {"label": "SBIN", "tv": "BSE:SBIN"},
-    {"label": "ITC", "tv": "BSE:ITC"},
-    {"label": "LT", "tv": "BSE:LT"},
+    {"label": "RELIANCE", "symbol": "RELIANCE"},
+    {"label": "TCS", "symbol": "TCS"},
+    {"label": "HDFCBANK", "symbol": "HDFCBANK"},
+    {"label": "INFY", "symbol": "INFY"},
+    {"label": "ICICIBANK", "symbol": "ICICIBANK"},
+    {"label": "SBIN", "symbol": "SBIN"},
+    {"label": "ITC", "symbol": "ITC"},
+    {"label": "LT", "symbol": "LT"},
 ]
 
 app = Flask(__name__)
+_instrument_token_cache: dict[str, int] = {}
+
+INTERVALS = {
+    "1m": {"kite": "minute", "days": 1, "step_minutes": 1, "points": 180},
+    "5m": {"kite": "5minute", "days": 5, "step_minutes": 5, "points": 180},
+    "15m": {"kite": "15minute", "days": 10, "step_minutes": 15, "points": 160},
+    "1h": {"kite": "60minute", "days": 30, "step_minutes": 60, "points": 120},
+    "1D": {"kite": "day", "days": 180, "step_minutes": 1440, "points": 120},
+}
+
+BASE_PRICES = {
+    "RELIANCE": 2900,
+    "TCS": 3900,
+    "HDFCBANK": 1700,
+    "INFY": 1800,
+    "ICICIBANK": 1200,
+    "SBIN": 800,
+    "ITC": 480,
+    "LT": 3700,
+}
 
 
 def _connect() -> sqlite3.Connection | None:
@@ -81,6 +103,128 @@ def _money(value: Any) -> float:
         return round(float(value or 0), 2)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _bot_text() -> str:
+    return BOT_FILE.read_text() if BOT_FILE.exists() else ""
+
+
+def _bot_cfg_value(key: str) -> str | None:
+    match = re.search(rf'"{re.escape(key)}"\s*:\s*([^,\n#]+)', _bot_text())
+    if not match:
+        return None
+    return match.group(1).strip().strip('"').strip("'")
+
+
+def _saved_access_token() -> str | None:
+    if not ACCESS_TOKEN_FILE.exists():
+        return None
+    try:
+        saved_date, token = ACCESS_TOKEN_FILE.read_text().strip().split("|", 1)
+    except ValueError:
+        return None
+    if saved_date != _today_ist().isoformat():
+        return None
+    return token
+
+
+def _kite_client():
+    api_key = _bot_cfg_value("api_key")
+    access_token = _saved_access_token()
+    if not api_key or api_key.startswith("YOUR_") or not access_token:
+        return None
+    from kiteconnect import KiteConnect
+
+    kite = KiteConnect(api_key=api_key)
+    kite.set_access_token(access_token)
+    return kite
+
+
+def _kite_instrument_token(kite, symbol: str) -> int | None:
+    if symbol in _instrument_token_cache:
+        return _instrument_token_cache[symbol]
+    instruments = kite.instruments("NSE")
+    for inst in instruments:
+        if inst.get("tradingsymbol") == symbol:
+            token = int(inst["instrument_token"])
+            _instrument_token_cache[symbol] = token
+            return token
+    return None
+
+
+def _kite_candles(symbol: str, interval: str) -> dict[str, Any] | None:
+    kite = _kite_client()
+    if kite is None:
+        return None
+    meta = INTERVALS.get(interval, INTERVALS["5m"])
+    token = _kite_instrument_token(kite, symbol)
+    if token is None:
+        return None
+
+    to_dt = dt.datetime.now(ZoneInfo("Asia/Kolkata")) if ZoneInfo else dt.datetime.now()
+    from_dt = to_dt - dt.timedelta(days=meta["days"])
+    rows = kite.historical_data(token, from_dt, to_dt, meta["kite"])
+    candles = []
+    for row in rows[-meta["points"]:]:
+        when = row["date"]
+        if hasattr(when, "timestamp"):
+            ts = int(when.timestamp())
+        else:
+            ts = int(dt.datetime.fromisoformat(str(when)).timestamp())
+        candles.append({
+            "time": ts,
+            "open": _money(row["open"]),
+            "high": _money(row["high"]),
+            "low": _money(row["low"]),
+            "close": _money(row["close"]),
+        })
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "source": "kite",
+        "message": "Zerodha Kite historical candles",
+        "candles": candles,
+    }
+
+
+def _demo_candles(symbol: str, interval: str) -> dict[str, Any]:
+    meta = INTERVALS.get(interval, INTERVALS["5m"])
+    points = meta["points"]
+    step = meta["step_minutes"]
+    base = BASE_PRICES.get(symbol, 1000)
+    now = dt.datetime.now(ZoneInfo("Asia/Kolkata")) if ZoneInfo else dt.datetime.now()
+    if interval == "1D":
+        start = (now - dt.timedelta(days=points)).replace(hour=15, minute=30, second=0, microsecond=0)
+    else:
+        start = now - dt.timedelta(minutes=points * step)
+
+    candles = []
+    previous = float(base)
+    symbol_seed = sum(ord(ch) for ch in symbol)
+    for idx in range(points):
+        current_time = start + dt.timedelta(days=idx if interval == "1D" else 0,
+                                           minutes=0 if interval == "1D" else idx * step)
+        wave = math.sin((idx + symbol_seed) / 7.0) * 0.0025
+        drift = math.sin((idx + symbol_seed) / 29.0) * 0.0012
+        close = max(previous * (1 + wave + drift), 1)
+        open_ = previous
+        high = max(open_, close) * (1 + 0.0018 + abs(math.sin(idx)) * 0.0015)
+        low = min(open_, close) * (1 - 0.0018 - abs(math.cos(idx)) * 0.0015)
+        previous = close
+        candles.append({
+            "time": int(current_time.timestamp()),
+            "open": round(open_, 2),
+            "high": round(high, 2),
+            "low": round(low, 2),
+            "close": round(close, 2),
+        })
+    return {
+        "symbol": symbol,
+        "interval": interval,
+        "source": "demo",
+        "message": "Demo candles. Configure bot.py and today's .access_token for Kite intraday data.",
+        "candles": candles,
+    }
 
 
 def _tail_log(lines: int = 80) -> list[str]:
@@ -121,25 +265,19 @@ def _market_status() -> dict[str, Any]:
 
 
 def _read_bot_config() -> dict[str, Any]:
-    if not BOT_FILE.exists():
+    text = _bot_text()
+    if not text:
         return {}
-    text = BOT_FILE.read_text()
-
-    def find_value(key: str) -> str | None:
-        match = re.search(rf'"{re.escape(key)}"\s*:\s*([^,\n#]+)', text)
-        if not match:
-            return None
-        return match.group(1).strip().strip('"').strip("'")
 
     paper_match = re.search(r"PAPER_TRADE\s*:\s*bool\s*=\s*(True|False)", text)
     indices = re.findall(r'"(NIFTY 50|NIFTY BANK)"\s*:', text)
     return {
         "paper_trade": paper_match.group(1) == "True" if paper_match else None,
-        "capital": find_value("capital"),
-        "max_lots": find_value("max_lots"),
-        "sl_pct": find_value("sl_pct"),
-        "target_pct": find_value("target_pct"),
-        "squareoff_time": find_value("squareoff_time"),
+        "capital": _bot_cfg_value("capital"),
+        "max_lots": _bot_cfg_value("max_lots"),
+        "sl_pct": _bot_cfg_value("sl_pct"),
+        "target_pct": _bot_cfg_value("target_pct"),
+        "squareoff_time": _bot_cfg_value("squareoff_time"),
         "indices": indices,
     }
 
@@ -311,6 +449,32 @@ def api_overview():
     return jsonify(build_overview())
 
 
+@app.route("/api/candles")
+def api_candles():
+    symbol = request.args.get("symbol", WATCHLIST[0]["symbol"]).upper()
+    interval = request.args.get("interval", "5m")
+    allowed_symbols = {item["symbol"] for item in WATCHLIST}
+    if symbol not in allowed_symbols:
+        return jsonify({"error": "Unsupported symbol"}), 400
+    if interval not in INTERVALS:
+        return jsonify({"error": "Unsupported interval"}), 400
+
+    try:
+        data = _kite_candles(symbol, interval)
+    except Exception as exc:
+        data = None
+        message = f"Kite data unavailable: {exc}"
+    else:
+        message = None
+
+    if data is None:
+        data = _demo_candles(symbol, interval)
+        if message:
+            data["message"] = f"{message}. Showing demo candles."
+
+    return jsonify(data)
+
+
 @app.route("/api/health")
 def api_health():
     return jsonify(
@@ -318,6 +482,7 @@ def api_health():
             "ok": True,
             "database": DB_FILE.exists(),
             "log": LOG_FILE.exists(),
+            "kite_token": _saved_access_token() is not None,
             "market": _market_status(),
         }
     )

@@ -13,7 +13,7 @@ Claude AI to validate ambiguous setups before placing orders.
 | `bot.py` | Main bot — run this every morning |
 | `journal.py` | SQLite trade journal + P&L tracker |
 | `dashboard.py` | Live terminal UI (run in second terminal) |
-| `web_dashboard.py` | Browser monitor with TradingView chart widget |
+| `web_dashboard.py` | Browser monitor with intraday charting |
 | `backtest.py` | Test strategy on historical Kite data |
 | `setup.py` | First-time setup wizard |
 
@@ -42,11 +42,12 @@ python backtest.py --symbol RELIANCE --days 30
 ```
 
 Open the browser monitor at `http://127.0.0.1:5050`. It reads local
-`trades.db` and `bot.log` at runtime and embeds TradingView charts for the
-configured watchlist. The chart watchlist uses BSE equity symbols because
-TradingView's free embedded widget can restrict NSE index symbols such as
-NIFTY/BANKNIFTY. Runtime databases, logs, CSV exports, and generated reports
-are ignored by Git.
+`trades.db` and `bot.log` at runtime and renders candles with TradingView
+Lightweight Charts. Minute and hourly intervals use Zerodha Kite data when
+`bot.py` credentials and today's `.access_token` are available; otherwise the
+monitor labels the chart as demo candles so you can still test the interface.
+Runtime databases, logs, access tokens, CSV exports, and generated reports are
+ignored by Git.
 
 ---
 

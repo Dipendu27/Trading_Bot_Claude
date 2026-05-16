@@ -89,7 +89,14 @@
     }
     .icon-button { width: 34px; cursor: pointer; }
     .chart-wrap { height: 560px; min-height: 420px; }
-    #tv-chart { height: 100%; width: 100%; }
+    #market-chart { height: 100%; width: 100%; }
+    .chart-status {
+      min-width: 180px;
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      text-align: right;
+    }
     .metrics {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -195,19 +202,22 @@
           <div class="controls">
             <select id="symbol-select" aria-label="Symbol">
               {% for item in watchlist %}
-              <option value="{{ item.tv }}">{{ item.label }}</option>
+              <option value="{{ item.symbol }}">{{ item.label }}</option>
               {% endfor %}
             </select>
             <select id="interval-select" aria-label="Interval">
-              <option value="D">1D</option>
-              <option value="W">1W</option>
-              <option value="M">1M</option>
+              <option value="1m">1m</option>
+              <option value="5m" selected>5m</option>
+              <option value="15m">15m</option>
+              <option value="1h">1h</option>
+              <option value="1D">1D</option>
             </select>
+            <span class="chart-status" id="chart-status">loading candles</span>
             <button class="icon-button" id="refresh-chart" title="Refresh chart">R</button>
           </div>
         </div>
         <div class="chart-wrap">
-          <div id="tv-chart"></div>
+          <div id="market-chart"></div>
         </div>
       </section>
 
@@ -281,11 +291,14 @@
   </main>
 </div>
 
+<script src="https://unpkg.com/lightweight-charts@4.2.0/dist/lightweight-charts.standalone.production.js"></script>
 <script>
 const fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const intFmt = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 let activeSymbol = document.getElementById('symbol-select').value;
 let activeInterval = document.getElementById('interval-select').value;
+let marketChart = null;
+let candleSeries = null;
 
 function money(value) {
   const number = Number(value || 0);
@@ -306,43 +319,53 @@ function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-function loadTradingView(symbol, interval = activeInterval) {
+function ensureMarketChart() {
+  const root = document.getElementById('market-chart');
+  if (marketChart) return;
+  marketChart = LightweightCharts.createChart(root, {
+    width: root.clientWidth,
+    height: root.clientHeight,
+    layout: { background: { color: '#0f1113' }, textColor: '#d7dde2' },
+    grid: {
+      vertLines: { color: 'rgba(255,255,255,.05)' },
+      horzLines: { color: 'rgba(255,255,255,.05)' }
+    },
+    rightPriceScale: { borderColor: '#30363d' },
+    timeScale: { borderColor: '#30363d', timeVisible: true, secondsVisible: false },
+    crosshair: { mode: LightweightCharts.CrosshairMode.Normal }
+  });
+  candleSeries = marketChart.addCandlestickSeries({
+    upColor: '#2fbf71',
+    downColor: '#e05252',
+    borderUpColor: '#2fbf71',
+    borderDownColor: '#e05252',
+    wickUpColor: '#2fbf71',
+    wickDownColor: '#e05252'
+  });
+  window.addEventListener('resize', () => {
+    marketChart.applyOptions({ width: root.clientWidth, height: root.clientHeight });
+  });
+}
+
+async function loadMarketChart(symbol, interval = activeInterval) {
   activeSymbol = symbol;
   activeInterval = interval;
-  const root = document.getElementById('tv-chart');
-  clearNode(root);
-
-  const container = document.createElement('div');
-  container.className = 'tradingview-widget-container';
-  container.style.height = '100%';
-  container.style.width = '100%';
-
-  const widget = document.createElement('div');
-  widget.className = 'tradingview-widget-container__widget';
-  widget.style.height = '100%';
-  widget.style.width = '100%';
-  container.appendChild(widget);
-
-  const script = document.createElement('script');
-  script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
-  script.async = true;
-  script.type = 'text/javascript';
-  script.text = JSON.stringify({
-    autosize: true,
-    symbol,
-    interval,
-    timezone: 'Asia/Kolkata',
-    theme: 'dark',
-    style: '1',
-    locale: 'in',
-    enable_publishing: false,
-    allow_symbol_change: true,
-    calendar: false,
-    hide_side_toolbar: false,
-    support_host: 'https://www.tradingview.com'
-  });
-  container.appendChild(script);
-  root.appendChild(container);
+  const status = document.getElementById('chart-status');
+  status.textContent = 'loading candles';
+  ensureMarketChart();
+  try {
+    const res = await fetch(`/api/candles?symbol=${encodeURIComponent(symbol)}&interval=${encodeURIComponent(interval)}`, { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'chart data failed');
+    candleSeries.setData(data.candles || []);
+    marketChart.timeScale().fitContent();
+    status.textContent = `${data.source.toUpperCase()} ${symbol} ${interval}`;
+    status.title = data.message || '';
+  } catch (err) {
+    candleSeries.setData([]);
+    status.textContent = 'chart unavailable';
+    status.title = String(err);
+  }
 }
 
 function drawBars(rows) {
@@ -453,11 +476,11 @@ async function refresh() {
   document.getElementById('last-updated').textContent = data.market.time;
 }
 
-document.getElementById('symbol-select').addEventListener('change', event => loadTradingView(event.target.value));
-document.getElementById('interval-select').addEventListener('change', event => loadTradingView(activeSymbol, event.target.value));
-document.getElementById('refresh-chart').addEventListener('click', () => loadTradingView(activeSymbol, activeInterval));
+document.getElementById('symbol-select').addEventListener('change', event => loadMarketChart(event.target.value));
+document.getElementById('interval-select').addEventListener('change', event => loadMarketChart(activeSymbol, event.target.value));
+document.getElementById('refresh-chart').addEventListener('click', () => loadMarketChart(activeSymbol, activeInterval));
 
-loadTradingView(activeSymbol);
+loadMarketChart(activeSymbol);
 refresh();
 setInterval(refresh, 5000);
 </script>

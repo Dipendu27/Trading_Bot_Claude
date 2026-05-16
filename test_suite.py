@@ -336,6 +336,7 @@ def test_web_dashboard():
         page = client.get("/")
         health = client.get("/api/health")
         overview = client.get("/api/overview")
+        candles = client.get("/api/candles?symbol=RELIANCE&interval=5m")
 
         if page.status_code != 200:
             print_error(f"Dashboard page failed: HTTP {page.status_code}")
@@ -346,10 +347,15 @@ def test_web_dashboard():
         if overview.status_code != 200 or "summary" not in overview.get_json():
             print_error("Overview API failed")
             return False
+        candle_data = candles.get_json()
+        if candles.status_code != 200 or not candle_data.get("candles"):
+            print_error("Candle API failed")
+            return False
 
         print_success("Dashboard page renders")
         print_success("Health API responds")
         print_success("Overview API responds")
+        print_success("Candle API responds")
         return True
     except Exception as e:
         print_error(f"Web dashboard smoke test failed: {e}")
