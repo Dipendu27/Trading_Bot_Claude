@@ -58,7 +58,7 @@ def print_info(msg):
 def test_file_existence():
     print_header("TEST 1: File Existence & Structure")
     
-    required_files = ['bot.py', 'backtest.py', 'journal.py', 'dashboard.py', 'web_dashboard.py', 'setup.py']
+    required_files = ['bot.py', 'backtest.py', 'journal.py', 'web_dashboard.py', 'setup.py']
     all_exist = True
     
     for fname in required_files:
@@ -79,7 +79,7 @@ def test_python_syntax():
     print_header("TEST 2: Python Syntax Validation")
     
     import py_compile
-    files = ['bot.py', 'backtest.py', 'journal.py', 'dashboard.py', 'web_dashboard.py', 'setup.py']
+    files = ['bot.py', 'backtest.py', 'journal.py', 'web_dashboard.py', 'setup.py']
     all_valid = True
     
     for fname in files:
@@ -106,7 +106,6 @@ def test_import_dependencies():
         'anthropic': 'Claude API',
         'schedule': 'Task scheduling',
         'requests': 'HTTP requests',
-        'rich': 'Terminal UI',
         'flask': 'Web dashboard',
     }
     
@@ -547,7 +546,6 @@ def main():
 
 3. LIVE TRADING:
    • python bot.py          (main trader, run daily at 9:00 AM)
-   • python dashboard.py    (in another terminal, optional)
    • python web_dashboard.py (browser monitor, optional)
 
 4. MONITORING:

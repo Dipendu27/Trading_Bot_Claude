@@ -1,30 +1,44 @@
 """
-Zerodha AI Options Bot — Powered by Claude
-============================================
-Trades weekly NIFTY / BANKNIFTY options on NFO exchange.
-
-Key differences from the equity bot:
-  • Exchange   : NFO (not NSE)
-  • Instruments: ATM CE/PE options, auto-selected each session
-  • Lot sizes  : NIFTY=25, BANKNIFTY=15, FINNIFTY=40
-  • Greeks     : Delta, Theta, IV fed to Claude for smarter decisions
-  • Position   : Premium-based sizing (not price × qty)
-  • Paper mode : Set PAPER_TRADE=True to simulate without real orders
-
-Architecture (unchanged from equity bot):
-  • WebSocket tick stream     → real-time price feed
-  • Dual-timeframe signals    → 1-min (scalp) + 5-min (trend) on the INDEX
-  • Claude AI brain           → PRIMARY for ambiguous signals
-  • Local LLM (Ollama)        → AUTO-FALLBACK when internet drops
-  • Fake breakout filter      → volume + spread + body + OBV analysis
-  • Connectivity watchdog     → detects drops, switches brain, auto-restores
+Trade_Claude v2 — Zerodha AI Options Bot (Multi-Regime)
+=========================================================
+Improvements over v1:
+  ┌─────────────────────────────────────────────────────────┐
+  │ MARKET REGIME DETECTION                                  │
+  │   Classifies market as BULL / BEAR / SIDEWAYS each bar  │
+  │   using ADX + slope of 15-min EMA + VIX proxy           │
+  │   Strategy parameters auto-switch per regime            │
+  ├─────────────────────────────────────────────────────────┤
+  │ BULL market  → buy CE aggressively, trail target wide   │
+  │ BEAR market  → buy PE aggressively, trail target wide   │
+  │ SIDEWAYS     → sell iron condor skew; buy only on       │
+  │               confirmed breakouts; tighten SL           │
+  ├─────────────────────────────────────────────────────────┤
+  │ IMPROVED SIGNAL ENGINE                                   │
+  │   + ADX(14) — only trade when ADX > 20 (avoid chop)    │
+  │   + Supertrend — trend confirmation & dynamic SL        │
+  │   + VWAP bands (±1σ, ±2σ) — mean-reversion in SIDEWAYS │
+  │   + Volume profile proxy (POC detection)                │
+  │   + Options-specific: IV percentile filter (skip when   │
+  │     IV rank > 80 — premium too expensive to buy)        │
+  ├─────────────────────────────────────────────────────────┤
+  │ SMARTER POSITION MANAGEMENT                             │
+  │   + Scaled exit: close 50% at 1:1, let rest run        │
+  │   + Regime-aware SL/target (wider in trend, tighter     │
+  │     in sideways)                                        │
+  │   + Max daily loss circuit-breaker (stops new trades)   │
+  │   + Cool-down after 2 consecutive losses               │
+  ├─────────────────────────────────────────────────────────┤
+  │ CLAUDE AI — options-aware prompt with regime context    │
+  │ OLLAMA FALLBACK — auto-switch on internet drop          │
+  │ PAPER TRADE = True (default)                            │
+  └─────────────────────────────────────────────────────────┘
 
 Run:
-    pip install kiteconnect anthropic pandas numpy schedule requests rich
+    pip install kiteconnect anthropic pandas numpy schedule requests scipy
     python bot.py
 """
 
-import os, time, math, logging, schedule, threading, datetime, queue, json
+import os, time, math, logging, schedule, threading, datetime
 import numpy as np
 import pandas as pd
 from collections import deque
@@ -34,121 +48,130 @@ import journal
 from typing import Dict, List, Any, Optional, Tuple
 
 # ══════════════════════════════════════════════════════════
-#  PAPER TRADE FLAG  ← set False only when ready for live
+#  PAPER TRADE SWITCH
 # ══════════════════════════════════════════════════════════
-PAPER_TRADE: bool = True        # ← True = simulate; False = real orders
+PAPER_TRADE: bool = True   # ← set False only when ready for real money
 
 # ══════════════════════════════════════════════════════════
 #  CONFIG
 # ══════════════════════════════════════════════════════════
 CFG: Dict[str, Any] = {
-    # ── Zerodha ──────────────────────────────────────────
-    "api_key":    "YOUR_ZERODHA_API_KEY",
-    "api_secret": "YOUR_ZERODHA_API_SECRET",
-
-    # ── Anthropic (PRIMARY BRAIN) ─────────────────────────
+    # ── Credentials (filled by setup.py) ─────────────────
+    "api_key":       "YOUR_ZERODHA_API_KEY",
+    "api_secret":    "YOUR_ZERODHA_API_SECRET",
     "anthropic_key": "YOUR_ANTHROPIC_API_KEY",
     "claude_model":  "claude-sonnet-4-6",
 
-    # ── Local LLM (FALLBACK — used only when internet is down) ──
+    # ── Local LLM fallback ────────────────────────────────
     "local_llm_model": "mistral",
     "local_llm_url":   "http://localhost:11434/api/generate",
     "llm_timeout_sec": 4,
     "_use_local_llm":  False,
 
-    # ── Options Config ────────────────────────────────────
-    # Indices to trade options on (NSE index name → option root)
+    # ── Indices ───────────────────────────────────────────
     "indices": {
         "NIFTY 50":   "NIFTY",
         "NIFTY BANK": "BANKNIFTY",
     },
-    # Lot sizes (NSE-defined; verify before trading as SEBI revises these)
-    "lot_sizes": {
-        "NIFTY":      25,
-        "BANKNIFTY":  15,
-        "FINNIFTY":   40,
-    },
-    # Strike steps (₹ between consecutive strikes)
-    "strike_step": {
-        "NIFTY":      50,
-        "BANKNIFTY":  100,
-    },
-    # CE on bullish signal, PE on bearish, BOTH means bot picks dynamically
-    "option_direction": "BOTH",
+    "lot_sizes":   {"NIFTY": 25, "BANKNIFTY": 15},
+    "strike_step": {"NIFTY": 50, "BANKNIFTY": 100},
+    "otm_offset":  0,
 
-    # OTM offset: 0 = ATM, 1 = 1 strike away from ATM, etc.
-    # ATM is usually highest liquidity; slight OTM gives leverage
-    "otm_offset": 0,
+    # ── Premium guard rails ───────────────────────────────
+    "max_premium": 300,
+    "min_premium":  20,
 
-    # Premium guard rails
-    "max_premium":  300,    # ₹ per share — reject options above this
-    "min_premium":   15,    # ₹ per share — reject near-zero options
+    # ── Capital & position sizing ─────────────────────────
+    "capital":        50000,
+    "risk_per_trade": 0.02,     # 2% per trade
+    "max_lots":       3,        # increased from 2 in v1
 
-    # Max lots per trade (controls cash exposure)
-    "max_lots":       2,
-
-    # ── Risk ──────────────────────────────────────────────
-    "capital":           50000,    # ₹ deployed — options need more margin buffer
-    "risk_per_trade":    0.02,     # 2% capital at risk per trade
-    "sl_pct":            0.25,     # 25% of premium (options move fast)
-    "target_pct":        0.50,     # 50% of premium (2:1 R:R)
+    # ── Regime-aware SL/Target ────────────────────────────
+    # These are overridden dynamically per regime (see REGIME_PARAMS)
+    "sl_pct":            0.30,
+    "target_pct":        0.60,
     "trail_sl":          True,
-    "trail_trigger_pct": 0.15,     # start trailing after premium +15%
-    "squareoff_time":    "15:15",  # hard exit before EOD
+    "trail_trigger_pct": 0.20,
 
-    # ── Dual-Timeframe Signal Tuning (on INDEX price) ────
-    "ema_fast_1m":  5,
-    "ema_slow_1m":  13,
-    "rsi_period_1m": 7,
-    "atr_period_1m": 7,
-    "ema_fast_5m":  9,
-    "ema_slow_5m":  21,
-    "rsi_period_5m": 14,
-    "atr_period_5m": 14,
-    "min_volume_ratio":  1.1,
-    "fake_break_ratio":  0.3,
-    "vwap_deviation":    2.0,
+    # ── Scaled exit ───────────────────────────────────────
+    "scale_exit":         True,   # close 50% at 1:1 R:R, rest at target
+    "scale_exit_ratio":   0.5,    # fraction to close at 1:1
 
-    # ── Timeframe agreement thresholds ───────────────────
-    "tf_agree_score_threshold":    5,
-    "tf_single_score_threshold":   4,
-    "tf_ambiguous_claude_always": True,
+    # ── Daily circuit-breaker ─────────────────────────────
+    "max_daily_loss":      10000,  # ₹ — stop new trades for the day
+    "cooldown_after_loss": 2,      # consecutive losses before 15-min pause
 
-    # ── Claude call throttle ──────────────────────────────
+    # ── EOD ───────────────────────────────────────────────
+    "squareoff_time": "15:15",
+    "no_new_trades_after": "14:45",  # stop entering past this time
+
+    # ── Indicators ────────────────────────────────────────
+    "ema_fast_1m": 5,  "ema_slow_1m": 13,  "rsi_period_1m": 7,  "atr_period_1m": 7,
+    "ema_fast_5m": 9,  "ema_slow_5m": 21,  "rsi_period_5m": 14, "atr_period_5m": 14,
+    "ema_trend_15m": 21,   # 15-min EMA for regime slope
+    "adx_period":    14,
+    "supertrend_mult": 2.5,
+    "min_adx_trend":   20,   # ADX must be > this for trend trades
+    "min_adx_sideways": 15,  # ADX < this = confirmed sideways
+    "min_volume_ratio": 1.1,
+    "fake_break_ratio": 0.3,
+
+    # ── IV filter ─────────────────────────────────────────
+    "iv_rank_lookback": 20,   # sessions to compute IV rank
+    "iv_rank_max":      75,   # skip BUY if IV rank > 75% (too expensive)
+
+    # ── Signal thresholds ─────────────────────────────────
+    "tf_agree_score":  5,
+    "tf_single_score": 4,
+
+    # ── Claude rate limit ─────────────────────────────────
     "claude_calls_per_min": 10,
 
     # ── Misc ──────────────────────────────────────────────
-    "tick_buffer_1m":       300,
-    "tick_buffer_5m":       100,
-    "log_file":             "bot.log",
-    "data_quality_min_1m":  15,
-    "data_quality_min_5m":  10,
+    "tick_buffer_1m":      400,
+    "tick_buffer_5m":      120,
+    "tick_buffer_15m":     60,
+    "log_file":            "bot.log",
+    "data_quality_min_1m": 20,
+    "data_quality_min_5m": 10,
+    "data_quality_min_15m": 5,
 }
 
-
-def _load_local_env() -> None:
-    env_path = os.path.join(os.path.dirname(__file__), ".env")
-    if not os.path.exists(env_path):
-        return
-    with open(env_path) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            key, value = line.split("=", 1)
-            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
-
-
-def _apply_env_config() -> None:
-    _load_local_env()
-    CFG["api_key"] = os.getenv("KITE_API_KEY") or os.getenv("ZERODHA_API_KEY") or CFG["api_key"]
-    CFG["api_secret"] = os.getenv("KITE_API_SECRET") or os.getenv("ZERODHA_API_SECRET") or CFG["api_secret"]
-    CFG["anthropic_key"] = os.getenv("ANTHROPIC_API_KEY") or CFG["anthropic_key"]
-    if os.getenv("TRADE_CAPITAL"):
-        CFG["capital"] = float(os.getenv("TRADE_CAPITAL", CFG["capital"]))
-
-
-_apply_env_config()
+# ══════════════════════════════════════════════════════════
+#  REGIME PARAMETERS  — auto-selected per detected regime
+# ══════════════════════════════════════════════════════════
+REGIME_PARAMS: Dict[str, Dict[str, Any]] = {
+    "BULL": {
+        "sl_pct":            0.28,   # slightly tighter SL — trend has momentum
+        "target_pct":        0.80,   # ride the trend further
+        "trail_trigger_pct": 0.25,   # let premium run before trailing
+        "otm_offset":        0,      # ATM CE
+        "preferred_dir":     "CE",
+        "min_adx":           20,
+        "score_threshold":   4,      # slightly more permissive entry
+        "description": "Trending up — buy CE aggressively, wide target",
+    },
+    "BEAR": {
+        "sl_pct":            0.28,
+        "target_pct":        0.80,
+        "trail_trigger_pct": 0.25,
+        "otm_offset":        0,      # ATM PE
+        "preferred_dir":     "PE",
+        "min_adx":           20,
+        "score_threshold":   4,
+        "description": "Trending down — buy PE aggressively, wide target",
+    },
+    "SIDEWAYS": {
+        "sl_pct":            0.20,   # tight SL in chop
+        "target_pct":        0.35,   # quick profit, don't be greedy
+        "trail_trigger_pct": 0.10,
+        "otm_offset":        0,
+        "preferred_dir":     "BOTH", # trade breakouts in either direction
+        "min_adx":           15,     # lower bar but needs breakout confirm
+        "score_threshold":   6,      # stricter entry — more signals needed
+        "description": "Range-bound — scalp breakouts only, tight SL/target",
+    },
+}
 
 # ══════════════════════════════════════════════════════════
 #  LOGGING
@@ -156,34 +179,38 @@ _apply_env_config()
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s | %(levelname)-8s | %(message)s",
-    handlers=[logging.FileHandler(CFG["log_file"]), logging.StreamHandler()],
+    handlers=[
+        logging.FileHandler(CFG["log_file"]),
+        logging.StreamHandler(),
+    ],
 )
-log = logging.getLogger("OptionsBot")
-
-if PAPER_TRADE:
-    log.info("=" * 65)
-    log.info("  *** PAPER TRADE MODE ACTIVE — NO REAL ORDERS WILL PLACE ***")
-    log.info("=" * 65)
+log = logging.getLogger("TradeClaude_v2")
 
 # ══════════════════════════════════════════════════════════
-#  STATE
+#  SHARED STATE
 # ══════════════════════════════════════════════════════════
 open_positions: Dict[str, Dict[str, Any]] = {}
 tick_store_1m:  Dict[int, deque] = {}
 tick_store_5m:  Dict[int, deque] = {}
+tick_store_15m: Dict[int, deque] = {}
 live_ticks:     Dict[int, Dict[str, Any]] = {}
 token_sym:      Dict[int, str]  = {}
 sym_token:      Dict[str, int]  = {}
-claude_calls:   List[float]     = []
 builders:       Dict[int, Any]  = {}
+claude_calls:   List[float]     = []
+index_prices:   Dict[str, float] = {}
+active_options: Dict[str, Dict[str, Any]] = {}
 
-# Options-specific: maps index root → selected option instrument for today
-# e.g. {"NIFTY": {"CE": "NIFTY24JAN22500CE", "PE": "NIFTY24JAN22500PE"}}
-active_options: Dict[str, Dict[str, str]] = {}
-index_prices:   Dict[str, float] = {}   # latest LTP for each index
+# Session-level tracking
+session_pnl:        float = 0.0
+consecutive_losses: int   = 0
+cooldown_until:     Optional[datetime.datetime] = None
+daily_stopped:      bool  = False
+current_regime:     Dict[str, str] = {}  # index_name → "BULL"/"BEAR"/"SIDEWAYS"
+iv_history:         Dict[str, deque] = {}  # root → deque of daily IV values
 
 # ══════════════════════════════════════════════════════════
-#  BRAIN STATE HELPERS
+#  HELPERS
 # ══════════════════════════════════════════════════════════
 def using_claude() -> bool:
     return not CFG["_use_local_llm"]
@@ -191,23 +218,36 @@ def using_claude() -> bool:
 def brain_name() -> str:
     return "Claude" if using_claude() else f"Ollama/{CFG['local_llm_model']}"
 
+def regime_params(index_sym: str) -> Dict[str, Any]:
+    regime = current_regime.get(index_sym, "SIDEWAYS")
+    return REGIME_PARAMS[regime]
+
+def can_enter() -> bool:
+    """Global gate: circuit breaker + cooldown + time check."""
+    if daily_stopped:
+        return False
+    if cooldown_until and datetime.datetime.now() < cooldown_until:
+        return False
+    now = datetime.datetime.now().time()
+    if now >= datetime.time(14, 45):
+        return False
+    return True
+
 # ══════════════════════════════════════════════════════════
 #  AUTHENTICATION
 # ══════════════════════════════════════════════════════════
 def get_kite() -> KiteConnect:
-    kite = KiteConnect(api_key=CFG["api_key"])
+    kite       = KiteConnect(api_key=CFG["api_key"])
     token_file = ".access_token"
-    today = datetime.date.today().isoformat()
-
+    today      = datetime.date.today().isoformat()
     if os.path.exists(token_file):
-        saved_date, saved_tok = open(token_file).read().strip().split("|")
-        if saved_date == today:
-            kite.set_access_token(saved_tok)
+        parts = open(token_file).read().strip().split("|")
+        if len(parts) == 2 and parts[0] == today:
+            kite.set_access_token(parts[1])
             log.info("Reused access token.")
             return kite
-
-    print(f"\nOpen this URL and login:\n{kite.login_url()}\n")
-    req_tok = input("Paste request_token from redirect URL: ").strip()
+    print(f"\nLogin URL:\n{kite.login_url()}\n")
+    req_tok = input("Paste request_token: ").strip()
     sess    = kite.generate_session(req_tok, api_secret=CFG["api_secret"])
     kite.set_access_token(sess["access_token"])
     open(token_file, "w").write(f"{today}|{sess['access_token']}")
@@ -215,207 +255,98 @@ def get_kite() -> KiteConnect:
     return kite
 
 # ══════════════════════════════════════════════════════════
-#  INSTRUMENT LOADER  —  index spot + NFO options
+#  INSTRUMENT LOADER
 # ══════════════════════════════════════════════════════════
 def load_tokens(kite: KiteConnect) -> List[int]:
-    """
-    Loads:
-      1. NSE index instruments (NIFTY 50, NIFTY BANK) for price feed
-      2. NFO weekly/near-expiry CE+PE options for the active indices
-
-    Populates token_sym, sym_token, and active_options.
-    Returns list of all tokens to subscribe to.
-    """
-    # ── Step 1: NSE index tokens ─────────────────────────
+    today     = datetime.date.today()
     nse_insts = kite.instruments("NSE")
     for inst in nse_insts:
         s = inst["tradingsymbol"]
         if s in CFG["indices"]:
             token_sym[inst["instrument_token"]] = s
             sym_token[s] = inst["instrument_token"]
-            log.info(f"  Index loaded: {s} → token {inst['instrument_token']}")
+            log.info(f"  Index: {s} → {inst['instrument_token']}")
 
-    # ── Step 2: NFO options ───────────────────────────────
-    nfo_insts  = kite.instruments("NFO")
-    today      = datetime.date.today()
-
-    # Find the nearest weekly expiry (next Thursday for NIFTY/BANKNIFTY)
-    expiry_map: Dict[str, datetime.date] = {}
-    for root in CFG["lot_sizes"]:
-        # Collect all expiries for this root that are >= today
-        expiries = sorted({
-            inst["expiry"]
-            for inst in nfo_insts
-            if inst["name"] == root
-            and inst["expiry"] is not None
-            and inst["expiry"] >= today
-        })
-        if expiries:
-            expiry_map[root] = expiries[0]
-            log.info(f"  {root} near expiry: {expiry_map[root]}")
-
-    # Build a lookup: (root, expiry, strike, instrument_type) → instrument
-    nfo_lookup: Dict[tuple, Any] = {}
-    for inst in nfo_insts:
-        root = inst.get("name", "")
-        if root in expiry_map and inst["expiry"] == expiry_map[root]:
-            key = (root, inst["strike"], inst["instrument_type"])
-            nfo_lookup[key] = inst
-
-    # ── Step 3: Pick ATM + OTM options ──────────────────
-    # We don't know the current index price yet (no ticks), so we use
-    # yesterday's close from the kite quote API as a proxy.
+    nfo_insts = kite.instruments("NFO")
     for index_name, root in CFG["indices"].items():
-        if root not in expiry_map:
-            continue
         if index_name not in sym_token:
             continue
-
-        try:
-            quote = kite.quote(f"NSE:{index_name}")
-            current_price = quote[f"NSE:{index_name}"]["last_price"]
-        except Exception as e:
-            log.warning(f"  Could not fetch {index_name} quote: {e}. Skipping.")
+        expiries = sorted({
+            i["expiry"] for i in nfo_insts
+            if i["name"] == root and i["expiry"] and i["expiry"] >= today
+        })
+        if not expiries:
             continue
-
+        expiry = expiries[0]
+        log.info(f"  {root} expiry: {expiry}")
+        try:
+            q   = kite.quote(f"NSE:{index_name}")
+            ltp = q[f"NSE:{index_name}"]["last_price"]
+        except Exception as e:
+            log.warning(f"  Quote failed for {index_name}: {e}")
+            continue
         step   = CFG["strike_step"].get(root, 50)
-        offset = CFG["otm_offset"]
-        atm    = round(current_price / step) * step
-
-        # ATM and nearby strikes to subscribe to
-        strikes_to_watch = [atm + i * step for i in range(-2 + offset, 3 + offset)]
-
-        active_options[root] = {"CE": None, "PE": None, "expiry": expiry_map[root]}
-        tokens_added = 0
-
-        for strike in strikes_to_watch:
-            for opt_type in ["CE", "PE"]:
-                key = (root, float(strike), opt_type)
-                inst = nfo_lookup.get(key)
+        atm    = round(ltp / step) * step
+        active_options[root] = {"CE": None, "PE": None, "expiry": expiry}
+        loaded = 0
+        for s_off in range(-3, 4):       # ATM-3 to ATM+3
+            strike = atm + s_off * step
+            for ot in ("CE", "PE"):
+                inst = next((i for i in nfo_insts
+                             if i["name"] == root and i["expiry"] == expiry
+                             and abs(i["strike"] - strike) < 0.01
+                             and i["instrument_type"] == ot), None)
                 if not inst:
                     continue
                 tok = inst["instrument_token"]
                 sym = inst["tradingsymbol"]
                 token_sym[tok] = sym
                 sym_token[sym] = tok
+                if s_off == CFG["otm_offset"] and ot == "CE":
+                    active_options[root]["CE"] = sym
+                if s_off == -CFG["otm_offset"] and ot == "PE":
+                    active_options[root]["PE"] = sym
+                loaded += 1
+        log.info(f"  {root}: {loaded} option tokens | CE={active_options[root]['CE']} PE={active_options[root]['PE']}")
 
-                # Track the ATM option as the primary trading instrument
-                if strike == atm + offset * step:
-                    active_options[root][opt_type] = sym
-                    log.info(f"  Active option: {sym} (ATM{'+' + str(offset) if offset else ''})")
-
-                tokens_added += 1
-
-        log.info(f"  {root}: loaded {tokens_added} option instruments "
-                 f"around ATM ₹{atm}")
-
-    all_tokens = list(token_sym.keys())
-    log.info(f"Total tokens subscribed: {len(all_tokens)}")
-    return all_tokens
+    tokens = list(token_sym.keys())
+    log.info(f"Total tokens: {len(tokens)}")
+    return tokens
 
 # ══════════════════════════════════════════════════════════
-#  LIVE OPTION SELECTOR  (re-evaluates ATM on each scan)
+#  CANDLE BUILDER  (1m + 5m + 15m simultaneously)
 # ══════════════════════════════════════════════════════════
-def get_live_option(root: str, direction: str) -> Optional[str]:
-    """
-    Returns the tradingsymbol of the best-fit option for the given direction.
-    Re-selects dynamically as index moves, staying near ATM.
-
-    direction: "CE" (bullish) or "PE" (bearish)
-    """
-    if root not in active_options:
-        return None
-
-    index_name = next(
-        (k for k, v in CFG["indices"].items() if v == root), None
-    )
-    if not index_name:
-        return None
-
-    ltp = index_prices.get(index_name, 0)
-    if ltp == 0:
-        # Fall back to pre-selected option
-        return active_options[root].get(direction)
-
-    step   = CFG["strike_step"].get(root, 50)
-    offset = CFG["otm_offset"]
-    atm    = round(ltp / step) * step
-
-    if direction == "CE":
-        strike = atm + offset * step
-    else:  # PE — OTM is below ATM
-        strike = atm - offset * step
-
-    key = (root, float(strike), direction)
-    # Look up in token_sym (we already loaded nearby options)
-    for tok, sym in token_sym.items():
-        if sym.startswith(root) and f"{int(strike)}{direction}" in sym:
-            # Check premium guard rails
-            ltp_opt = live_ticks.get(tok, {}).get("last_price", 0)
-            if ltp_opt and (ltp_opt < CFG["min_premium"] or ltp_opt > CFG["max_premium"]):
-                log.debug(f"  {sym} premium ₹{ltp_opt:.0f} outside guard rails — skipping")
-                return None
-            return sym
-
-    # Fall back to pre-selected
-    return active_options[root].get(direction)
-
-# ══════════════════════════════════════════════════════════
-#  DUAL CANDLE BUILDER  (1-min and 5-min from ticks)
-#  Unchanged from equity bot — signals run on INDEX price
-# ══════════════════════════════════════════════════════════
-class DualCandleBuilder:
+class CandleBuilder:
     def __init__(self, token: int):
         self.token = token
-        self.o1 = self.h1 = self.l1 = self.c1 = self.v1 = 0.0
-        self.ts1: Optional[datetime.datetime] = None
-        self.o5 = self.h5 = self.l5 = self.c5 = self.v5 = 0.0
-        self.ts5: Optional[datetime.datetime] = None
+        self._state: Dict[int, Dict] = {1: {}, 5: {}, 15: {}}
+        self._stores = {
+            1: (tick_store_1m, CFG["tick_buffer_1m"]),
+            5: (tick_store_5m, CFG["tick_buffer_5m"]),
+            15: (tick_store_15m, CFG["tick_buffer_15m"]),
+        }
 
-    def _minute_bucket(self, ts: datetime.datetime, interval: int) -> datetime.datetime:
-        floored = ts.replace(second=0, microsecond=0)
-        bucket  = (floored.minute // interval) * interval
-        return floored.replace(minute=bucket)
-
-    def _update(self, o, h, l, c, v, price, volume):
-        h = max(h, price)
-        l = min(l, price)
-        c = price
-        v += volume
-        return o, h, l, c, v
+    @staticmethod
+    def _bucket(ts: datetime.datetime, interval: int) -> datetime.datetime:
+        f = ts.replace(second=0, microsecond=0)
+        return f.replace(minute=(f.minute // interval) * interval)
 
     def add_tick(self, price: float, volume: float, ts: datetime.datetime):
-        # ── 1-min ──────────────────────────────────────────────
-        min1 = self._minute_bucket(ts, 1)
-        if self.ts1 is None:
-            self.ts1 = min1
-        if min1 != self.ts1:
-            buf = tick_store_1m.setdefault(self.token, deque(maxlen=CFG["tick_buffer_1m"]))
-            buf.append({"time": self.ts1, "open": self.o1, "high": self.h1,
-                        "low": self.l1, "close": self.c1, "volume": self.v1})
-            self.ts1 = min1
-            self.o1 = self.h1 = self.l1 = self.c1 = price
-            self.v1 = volume
-        else:
-            if self.o1 == 0: self.o1 = price
-            self.o1, self.h1, self.l1, self.c1, self.v1 = self._update(
-                self.o1, self.h1, self.l1, self.c1, self.v1, price, volume)
-
-        # ── 5-min ──────────────────────────────────────────────
-        min5 = self._minute_bucket(ts, 5)
-        if self.ts5 is None:
-            self.ts5 = min5
-        if min5 != self.ts5:
-            buf = tick_store_5m.setdefault(self.token, deque(maxlen=CFG["tick_buffer_5m"]))
-            buf.append({"time": self.ts5, "open": self.o5, "high": self.h5,
-                        "low": self.l5, "close": self.c5, "volume": self.v5})
-            self.ts5 = min5
-            self.o5 = self.h5 = self.l5 = self.c5 = price
-            self.v5 = volume
-        else:
-            if self.o5 == 0: self.o5 = price
-            self.o5, self.h5, self.l5, self.c5, self.v5 = self._update(
-                self.o5, self.h5, self.l5, self.c5, self.v5, price, volume)
+        for interval, (store, maxlen) in self._stores.items():
+            bucket = self._bucket(ts, interval)
+            s      = self._state[interval]
+            if not s or bucket != s.get("ts"):
+                if s:
+                    buf = store.setdefault(self.token, deque(maxlen=maxlen))
+                    buf.append({"time": s["ts"], "open": s["o"], "high": s["h"],
+                                "low": s["l"], "close": s["c"], "volume": s["v"]})
+                self._state[interval] = {"ts": bucket, "o": price, "h": price,
+                                          "l": price, "c": price, "v": volume}
+            else:
+                s["h"] = max(s["h"], price)
+                s["l"] = min(s["l"], price)
+                s["c"] = price
+                s["v"] += volume
 
 # ══════════════════════════════════════════════════════════
 #  INDICATORS
@@ -428,205 +359,338 @@ def df_from_buf(store: Dict[int, deque], token: int, min_bars: int) -> pd.DataFr
     df.set_index("time", inplace=True)
     return df
 
-def _ema(s: pd.Series, n: int) -> pd.Series:
-    return s.ewm(span=n, adjust=False).mean()
-
-def compute_indicators(df: pd.DataFrame, ema_fast: int, ema_slow: int,
-                       rsi_period: int, atr_period: int) -> pd.DataFrame:
+def compute_indicators(df: pd.DataFrame, ef: int, es: int,
+                        rp: int, ap: int) -> pd.DataFrame:
     df = df.copy()
-    df["ema_fast"] = _ema(df["close"], ema_fast)
-    df["ema_slow"] = _ema(df["close"], ema_slow)
+    # EMAs
+    df["ema_fast"] = df["close"].ewm(span=ef, adjust=False).mean()
+    df["ema_slow"] = df["close"].ewm(span=es, adjust=False).mean()
+    # RSI
     d   = df["close"].diff()
-    g   = d.clip(lower=0)
-    l_  = -d.clip(upper=0)
-    df["rsi"] = 100 - 100 / (
-        1 + g.ewm(com=rsi_period - 1, adjust=False).mean()
-          / l_.ewm(com=rsi_period - 1, adjust=False).mean().replace(0, np.nan)
-    )
+    g   = d.clip(lower=0).ewm(com=rp-1, adjust=False).mean()
+    l_  = (-d.clip(upper=0)).ewm(com=rp-1, adjust=False).mean().replace(0, float("nan"))
+    df["rsi"] = 100 - 100 / (1 + g / l_)
+    # ATR
     hl  = df["high"] - df["low"]
     hc  = (df["high"] - df["close"].shift()).abs()
     lc  = (df["low"]  - df["close"].shift()).abs()
-    df["atr"] = pd.concat([hl, hc, lc], axis=1).max(axis=1).ewm(
-        span=atr_period, adjust=False).mean()
-    tp = (df["high"] + df["low"] + df["close"]) / 3
-    df["vwap"]     = (tp * df["volume"]).cumsum() / df["volume"].cumsum()
-    df["vwap_std"] = (df["close"] - df["vwap"]).rolling(10).std()
-    df["obv"]      = (np.sign(df["close"].diff()) * df["volume"]).cumsum()
-    df["vol_ma"]   = df["volume"].rolling(10).mean()
+    df["atr"] = pd.concat([hl, hc, lc], axis=1).max(axis=1).ewm(span=ap, adjust=False).mean()
+    # VWAP with bands (resets per session — approximate with rolling since we don't have dates here)
+    tp          = (df["high"] + df["low"] + df["close"]) / 3
+    df["vwap"]  = (tp * df["volume"]).cumsum() / df["volume"].cumsum()
+    df["vwap_std"] = (df["close"] - df["vwap"]).rolling(20).std()
+    df["vwap_u1"]  = df["vwap"] + df["vwap_std"]        # +1σ
+    df["vwap_d1"]  = df["vwap"] - df["vwap_std"]        # -1σ
+    df["vwap_u2"]  = df["vwap"] + 2 * df["vwap_std"]   # +2σ
+    df["vwap_d2"]  = df["vwap"] - 2 * df["vwap_std"]   # -2σ
+    # OBV
+    df["obv"]    = (np.sign(df["close"].diff()) * df["volume"]).cumsum()
+    df["vol_ma"] = df["volume"].rolling(20).mean()
+    # ADX
+    df = _add_adx(df, CFG["adx_period"])
+    # Supertrend
+    df = _add_supertrend(df, CFG["adx_period"], CFG["supertrend_mult"])
     return df
+
+def _add_adx(df: pd.DataFrame, period: int = 14) -> pd.DataFrame:
+    """ADX — measures trend strength regardless of direction."""
+    hi, lo, cl = df["high"], df["low"], df["close"]
+    up   = hi.diff()
+    down = -lo.diff()
+    pos_dm = np.where((up > down) & (up > 0), up, 0.0)
+    neg_dm = np.where((down > up) & (down > 0), down, 0.0)
+    tr   = pd.concat([hi - lo, (hi - cl.shift()).abs(), (lo - cl.shift()).abs()], axis=1).max(axis=1)
+    atr  = tr.ewm(span=period, adjust=False).mean()
+    pdi  = 100 * pd.Series(pos_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr
+    ndi  = 100 * pd.Series(neg_dm, index=df.index).ewm(span=period, adjust=False).mean() / atr
+    dx   = (100 * (pdi - ndi).abs() / (pdi + ndi + 1e-9))
+    df["adx"] = dx.ewm(span=period, adjust=False).mean()
+    df["+di"] = pdi
+    df["-di"] = ndi
+    return df
+
+def _add_supertrend(df: pd.DataFrame, period: int = 14, mult: float = 2.5) -> pd.DataFrame:
+    """Supertrend — dynamic support/resistance based on ATR."""
+    hl2   = (df["high"] + df["low"]) / 2
+    atr   = df["atr"]
+    upper = hl2 + mult * atr
+    lower = hl2 - mult * atr
+    st    = pd.Series(index=df.index, dtype=float)
+    st_dir= pd.Series(index=df.index, dtype=int)   # 1=bullish, -1=bearish
+    for i in range(1, len(df)):
+        if df["close"].iloc[i] > upper.iloc[i-1]:
+            st.iloc[i]     = lower.iloc[i]
+            st_dir.iloc[i] = 1
+        elif df["close"].iloc[i] < lower.iloc[i-1]:
+            st.iloc[i]     = upper.iloc[i]
+            st_dir.iloc[i] = -1
+        else:
+            st_dir.iloc[i] = st_dir.iloc[i-1]
+            if st_dir.iloc[i] == 1:
+                st.iloc[i] = max(lower.iloc[i], st.iloc[i-1]) if i > 1 else lower.iloc[i]
+            else:
+                st.iloc[i] = min(upper.iloc[i], st.iloc[i-1]) if i > 1 else upper.iloc[i]
+    if len(df) > 0:
+        st.iloc[0]     = lower.iloc[0]
+        st_dir.iloc[0] = 1
+    df["supertrend"]     = st
+    df["supertrend_dir"] = st_dir
+    return df
+
+# ══════════════════════════════════════════════════════════
+#  MARKET REGIME DETECTOR
+# ══════════════════════════════════════════════════════════
+def detect_regime(df15: pd.DataFrame, df5: pd.DataFrame) -> str:
+    """
+    Returns "BULL", "BEAR", or "SIDEWAYS" based on:
+      1. ADX value (strength)
+      2. +DI vs -DI (direction)
+      3. Supertrend direction on 15m
+      4. 15m EMA slope
+
+    Logic:
+      ADX > 20 AND +DI > -DI AND ST bullish → BULL
+      ADX > 20 AND -DI > +DI AND ST bearish → BEAR
+      ADX < 20 (or conflicting signals)     → SIDEWAYS
+    """
+    if df15.empty or len(df15) < 5:
+        # Fall back to 5m if no 15m yet
+        if df5.empty or len(df5) < 5:
+            return "SIDEWAYS"
+        df = df5
+    else:
+        df = df15
+
+    last   = df.iloc[-1]
+    adx    = last.get("adx", 0)
+    pdi    = last.get("+di", 0)
+    ndi    = last.get("-di", 0)
+    st_dir = last.get("supertrend_dir", 0)
+
+    # EMA slope over last 5 bars
+    if len(df) >= 5:
+        slope = (float(df["ema_slow"].iloc[-1]) - float(df["ema_slow"].iloc[-5])) / 5
+    else:
+        slope = 0.0
+
+    if adx > CFG["min_adx_trend"]:
+        if pdi > ndi and st_dir == 1 and slope > 0:
+            return "BULL"
+        elif ndi > pdi and st_dir == -1 and slope < 0:
+            return "BEAR"
+        else:
+            return "SIDEWAYS"   # ADX high but conflicting → don't trade
+    else:
+        return "SIDEWAYS"
 
 # ══════════════════════════════════════════════════════════
 #  FAKE BREAKOUT FILTER
 # ══════════════════════════════════════════════════════════
-def is_fake_breakout(df: pd.DataFrame) -> Tuple[bool, str]:
+def is_fake_breakout(df: pd.DataFrame, regime: str) -> Tuple[bool, str]:
     if len(df) < 5:
         return False, ""
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
+    last = df.iloc[-1]; prev = df.iloc[-2]
     body = abs(last["close"] - last["open"])
     rng  = last["high"] - last["low"] + 1e-9
-    reasons: List[str] = []
-    if body / rng < CFG["fake_break_ratio"]:
-        reasons.append(f"thin body ({body/rng:.0%})")
-    vol_ratio = last["volume"] / (last["vol_ma"] + 1e-9)
-    if vol_ratio < CFG["min_volume_ratio"]:
-        reasons.append(f"low volume ({vol_ratio:.2f}x)")
+    flags: List[str] = []
+
+    # Body ratio — wick-heavy candle = indecision
+    ratio_threshold = CFG["fake_break_ratio"]
+    if regime == "SIDEWAYS":
+        ratio_threshold = 0.4   # stricter in sideways
+    if body / rng < ratio_threshold:
+        flags.append(f"thin-body({body/rng:.0%})")
+
+    # Volume
+    if last["volume"] < last["vol_ma"] * CFG["min_volume_ratio"]:
+        flags.append("low-vol")
+
+    # Close inside previous candle range
     if prev["low"] < last["close"] < prev["high"]:
-        reasons.append("close inside prev range")
-    if len(df) >= 4 and last["close"] > df.iloc[-4]["close"] and last["obv"] < df.iloc[-4]["obv"]:
-        reasons.append("OBV divergence")
-    if len(reasons) >= 2:
-        return True, " | ".join(reasons)
-    return False, ""
+        flags.append("inside-close")
+
+    # OBV divergence
+    if len(df) >= 4:
+        if last["close"] > df.iloc[-4]["close"] and last["obv"] < df.iloc[-4]["obv"]:
+            flags.append("OBV-div")
+
+    # In sideways, reject if close is inside VWAP bands (no breakout)
+    if regime == "SIDEWAYS":
+        if last.get("vwap_d1", 0) < last["close"] < last.get("vwap_u1", 1e9):
+            flags.append("vwap-inside")
+
+    threshold = 2 if regime != "SIDEWAYS" else 1   # stricter in sideways
+    is_fake   = len(flags) >= threshold
+    return is_fake, " | ".join(flags)
 
 # ══════════════════════════════════════════════════════════
-#  SINGLE-TIMEFRAME SCORER
+#  SINGLE-TIMEFRAME SCORER  (regime-aware, 0–10 points)
 # ══════════════════════════════════════════════════════════
-def score_tf(df: pd.DataFrame) -> Tuple[int, int, Dict[str, Any]]:
+def score_tf(df: pd.DataFrame, regime: str) -> Tuple[int, int, Dict[str, Any]]:
     if len(df) < 3:
         return 0, 0, {}
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    ago3 = df.iloc[-3]
+    last = df.iloc[-1]; prev = df.iloc[-2]; ago3 = df.iloc[-3]
 
-    ema_cross_up = prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
-    ema_cross_dn = prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
-    ema_trend_up = last["ema_fast"] > last["ema_slow"]
-    ema_trend_dn = last["ema_fast"] < last["ema_slow"]
-    rsi_bull     = 42 < last["rsi"] < 70
-    rsi_bear     = 30 < last["rsi"] < 58
-    rsi_ob       = last["rsi"] > 70
-    rsi_os       = last["rsi"] < 30
-    above_vwap   = last["close"] > last["vwap"]
-    momentum_up  = last["close"] > prev["close"] > ago3["close"]
-    momentum_dn  = last["close"] < prev["close"] < ago3["close"]
-    vol_spike    = last["volume"] > last["vol_ma"] * CFG["min_volume_ratio"]
-    obv_up       = last["obv"] > ago3["obv"]
-    obv_dn       = last["obv"] < ago3["obv"]
+    xup = prev["ema_fast"] <= prev["ema_slow"] and last["ema_fast"] > last["ema_slow"]
+    xdn = prev["ema_fast"] >= prev["ema_slow"] and last["ema_fast"] < last["ema_slow"]
+    tup = last["ema_fast"] > last["ema_slow"]
+    tdn = last["ema_fast"] < last["ema_slow"]
 
-    buy_signals = [
-        ema_cross_up or ema_trend_up,
-        rsi_bull and not rsi_ob,
-        above_vwap,
-        vol_spike,
-        obv_up,
-        momentum_up,
-        last["close"] > last["vwap"] + last.get("vwap_std", 0) * 0.3,
-        ema_cross_up,
-    ]
-    sell_signals = [
-        ema_cross_dn or ema_trend_dn,
-        rsi_bear and not rsi_os,
-        not above_vwap,
-        vol_spike,
-        obv_dn,
-        momentum_dn,
-        last["close"] < last["vwap"] - last.get("vwap_std", 0) * 0.3,
-        ema_cross_dn,
-    ]
+    rsi_bull = 42 < last["rsi"] < 72
+    rsi_bear = 28 < last["rsi"] < 58
+    abv_vwap = last["close"] > last["vwap"]
+    vol_spk  = last["volume"] > last["vol_ma"] * CFG["min_volume_ratio"]
+    obv_up   = last["obv"] > ago3["obv"]
+    obv_dn   = last["obv"] < ago3["obv"]
+    mom_up   = last["close"] > prev["close"] > ago3["close"]
+    mom_dn   = last["close"] < prev["close"] < ago3["close"]
+    st_bull  = last.get("supertrend_dir", 0) == 1
+    st_bear  = last.get("supertrend_dir", 0) == -1
+    adx_ok   = last.get("adx", 0) > regime_params_by_regime(regime)["min_adx"]
+
+    # SIDEWAYS-specific: VWAP band signals
+    at_vwap_sup = last["close"] < last.get("vwap_d1", 0)   # near lower band = bounce up
+    at_vwap_res = last["close"] > last.get("vwap_u1", 1e9) # near upper band = fade
+
+    if regime in ("BULL", "BEAR"):
+        buys  = [xup or tup, rsi_bull and last["rsi"] <= 72, abv_vwap,
+                 vol_spk, obv_up, mom_up,
+                 last["close"] > last.get("vwap_u1", 0), xup,
+                 st_bull, adx_ok]
+        sells = [xdn or tdn, rsi_bear and last["rsi"] >= 28, not abv_vwap,
+                 vol_spk, obv_dn, mom_dn,
+                 last["close"] < last.get("vwap_d1", 1e9), xdn,
+                 st_bear, adx_ok]
+    else:   # SIDEWAYS — mean reversion signals
+        buys  = [at_vwap_sup, rsi_bull and last["rsi"] < 50, abv_vwap,
+                 vol_spk, obv_up, mom_up, xup, st_bull, adx_ok,
+                 last["close"] > last.get("vwap_d2", 0)]
+        sells = [at_vwap_res, rsi_bear and last["rsi"] > 50, not abv_vwap,
+                 vol_spk, obv_dn, mom_dn, xdn, st_bear, adx_ok,
+                 last["close"] < last.get("vwap_u2", 1e9)]
 
     meta = {
-        "rsi":          round(float(last["rsi"]), 2),
-        "atr":          round(float(last["atr"]), 2),
-        "vwap":         round(float(last["vwap"]), 2),
-        "price":        last["close"],
-        "ema_fast":     round(float(last["ema_fast"]), 2),
-        "ema_slow":     round(float(last["ema_slow"]), 2),
-        "above_vwap":   above_vwap,
-        "ema_cross_up": ema_cross_up,
-        "ema_cross_dn": ema_cross_dn,
+        "rsi":      round(float(last["rsi"]), 2),
+        "adx":      round(float(last.get("adx", 0)), 2),
+        "atr":      round(float(last["atr"]), 2),
+        "vwap":     round(float(last["vwap"]), 2),
+        "price":    float(last["close"]),
+        "st_dir":   int(last.get("supertrend_dir", 0)),
+        "xup":      xup, "xdn": xdn,
     }
-    return sum(buy_signals), sum(sell_signals), meta
+    return sum(buys), sum(sells), meta
+
+def regime_params_by_regime(regime: str) -> Dict[str, Any]:
+    return REGIME_PARAMS.get(regime, REGIME_PARAMS["SIDEWAYS"])
 
 # ══════════════════════════════════════════════════════════
-#  DUAL-TIMEFRAME SIGNAL GENERATOR  (operates on INDEX)
+#  DUAL-TF SIGNAL  (regime-aware)
 # ══════════════════════════════════════════════════════════
 def generate_signal(index_sym: str) -> Dict[str, Any]:
-    """
-    Generates BUY/SELL/AMBIGUOUS/HOLD for the index direction.
-    BUY  → buy a CE option
-    SELL → buy a PE option (we always BUY options, never short)
-    """
     token = sym_token.get(index_sym)
+    empty = {
+        "action": "HOLD", "symbol": index_sym, "regime": "UNKNOWN",
+        "confidence": "no_data", "score_1m_buy": 0, "score_1m_sell": 0,
+        "score_5m_buy": 0, "score_5m_sell": 0, "total_buy": 0, "total_sell": 0,
+        "rsi_1m": None, "rsi_5m": None, "adx_1m": None,
+        "vwap": None, "atr": None, "supertrend_dir": None,
+        "fake_breakout": False, "fake_reason": "",
+        "price": index_prices.get(index_sym, 0),
+    }
     if token is None:
-        return {"action": "HOLD", "symbol": index_sym}
+        return empty
 
-    df1 = df_from_buf(tick_store_1m, token, CFG["data_quality_min_1m"])
-    df5 = df_from_buf(tick_store_5m, token, CFG["data_quality_min_5m"])
+    df1  = df_from_buf(tick_store_1m,  token, CFG["data_quality_min_1m"])
+    df5  = df_from_buf(tick_store_5m,  token, CFG["data_quality_min_5m"])
+    df15 = df_from_buf(tick_store_15m, token, CFG["data_quality_min_15m"])
 
-    has_1m = not df1.empty
-    has_5m = not df5.empty
+    if df1.empty and df5.empty:
+        return empty
 
-    if not has_1m and not has_5m:
-        return {"action": "HOLD", "symbol": index_sym, "confidence": "no_data",
-                "score_1m_buy": 0, "score_1m_sell": 0,
-                "score_5m_buy": 0, "score_5m_sell": 0,
-                "total_buy": 0, "total_sell": 0,
-                "rsi_1m": None, "rsi_5m": None, "atr_1m": None,
-                "vwap_1m": None, "vwap_5m": None,
-                "ema_cross_1m": False, "ema_cross_5m": False,
-                "fake_breakout": False, "fake_reason": "",
-                "has_1m": False, "has_5m": False,
-                "price": index_prices.get(index_sym, 0)}
-
-    s1b = s1s = s5b = s5s = 0
-    m1: Dict[str, Any] = {}
-    m5: Dict[str, Any] = {}
-    fake = False
-    fake_reason = ""
-
-    if has_1m:
+    # Compute indicators
+    if not df1.empty:
         df1 = compute_indicators(df1, CFG["ema_fast_1m"], CFG["ema_slow_1m"],
                                   CFG["rsi_period_1m"], CFG["atr_period_1m"])
-        s1b, s1s, m1 = score_tf(df1)
-        fake, fake_reason = is_fake_breakout(df1)
-
-    if has_5m:
+    if not df5.empty:
         df5 = compute_indicators(df5, CFG["ema_fast_5m"], CFG["ema_slow_5m"],
                                   CFG["rsi_period_5m"], CFG["atr_period_5m"])
-        s5b, s5s, m5 = score_tf(df5)
+    if not df15.empty:
+        df15 = compute_indicators(df15, CFG["ema_trend_15m"], CFG["ema_trend_15m"],
+                                   CFG["rsi_period_5m"], CFG["atr_period_5m"])
 
-    total_buy  = s1b + s5b
-    total_sell = s1s + s5s
-    thresh     = CFG["tf_agree_score_threshold"]
-    single     = CFG["tf_single_score_threshold"]
+    # Detect regime
+    regime = detect_regime(df15, df5)
+    current_regime[index_sym] = regime
+    rp     = regime_params_by_regime(regime)
 
-    if total_buy >= thresh * 2:
-        action, conf = "BUY",       "strong"
-    elif total_sell >= thresh * 2:
-        action, conf = "SELL",      "strong"
-    elif total_buy >= single * 2 or total_sell >= single * 2:
-        action, conf = "AMBIGUOUS", "moderate"
-    elif has_1m and has_5m and (s1b >= thresh or s5b >= thresh) and (s1b + s5b > s1s + s5s):
-        action, conf = "AMBIGUOUS", "weak_buy"
-    elif has_1m and has_5m and (s1s >= thresh or s5s >= thresh) and (s1s + s5s > s1b + s5b):
-        action, conf = "AMBIGUOUS", "weak_sell"
+    # Score each timeframe
+    s1b = s1s = s5b = s5s = 0
+    m1: Dict[str, Any] = {}; m5: Dict[str, Any] = {}
+    fake = False; fake_reason = ""
+
+    if not df1.empty:
+        s1b, s1s, m1 = score_tf(df1, regime)
+        fake, fake_reason = is_fake_breakout(df1, regime)
+
+    if not df5.empty:
+        s5b, s5s, m5 = score_tf(df5, regime)
+
+    tb = s1b + s5b; ts = s1s + s5s
+    thresh = rp["score_threshold"]   # regime-specific threshold
+
+    # Determine action
+    if tb >= thresh * 2:       action, conf = "BUY",       "strong"
+    elif ts >= thresh * 2:     action, conf = "SELL",      "strong"
+    elif tb >= thresh + 2:     action, conf = "AMBIGUOUS", "moderate-buy"
+    elif ts >= thresh + 2:     action, conf = "AMBIGUOUS", "moderate-sell"
+    elif s1b >= thresh or (not df5.empty and s5b >= thresh):
+        action, conf = "AMBIGUOUS", "weak-buy"
+    elif s1s >= thresh or (not df5.empty and s5s >= thresh):
+        action, conf = "AMBIGUOUS", "weak-sell"
     else:
-        action, conf = "HOLD",      "low"
+        action, conf = "HOLD", "low"
+
+    # In SIDEWAYS, only trade AMBIGUOUS or STRONG (more confirmation needed)
+    if regime == "SIDEWAYS" and action == "BUY" and tb < thresh * 2.5:
+        action, conf = "AMBIGUOUS", "sideways-needs-confirm"
+    if regime == "SIDEWAYS" and action == "SELL" and ts < thresh * 2.5:
+        action, conf = "AMBIGUOUS", "sideways-needs-confirm"
 
     return {
-        "action":       action,
-        "confidence":   conf,
-        "symbol":       index_sym,
-        "price":        index_prices.get(index_sym, m1.get("price") or m5.get("price", 0)),
-        "score_1m_buy":  s1b,
-        "score_1m_sell": s1s,
-        "score_5m_buy":  s5b,
-        "score_5m_sell": s5s,
-        "total_buy":     total_buy,
-        "total_sell":    total_sell,
-        "rsi_1m":        m1.get("rsi"),
-        "rsi_5m":        m5.get("rsi"),
-        "atr_1m":        m1.get("atr"),
-        "vwap_1m":       m1.get("vwap"),
-        "vwap_5m":       m5.get("vwap"),
-        "ema_cross_1m":  m1.get("ema_cross_up") or m1.get("ema_cross_dn"),
-        "ema_cross_5m":  m5.get("ema_cross_up") or m5.get("ema_cross_dn"),
-        "fake_breakout": fake,
-        "fake_reason":   fake_reason,
-        "has_1m":        has_1m,
-        "has_5m":        has_5m,
+        "action": action, "confidence": conf, "regime": regime,
+        "symbol": index_sym,
+        "price":  index_prices.get(index_sym, m1.get("price") or m5.get("price", 0)),
+        "score_1m_buy": s1b, "score_1m_sell": s1s,
+        "score_5m_buy": s5b, "score_5m_sell": s5s,
+        "total_buy": tb, "total_sell": ts,
+        "rsi_1m":  m1.get("rsi"), "rsi_5m":  m5.get("rsi"),
+        "adx_1m":  m1.get("adx"), "adx_5m":  m5.get("adx"),
+        "atr":     m1.get("atr"), "vwap":    m1.get("vwap"),
+        "supertrend_dir": m1.get("st_dir"),
+        "fake_breakout": fake, "fake_reason": fake_reason,
     }
+
+# ══════════════════════════════════════════════════════════
+#  IV RANK  (tracks rolling IV to avoid buying expensive premiums)
+# ══════════════════════════════════════════════════════════
+def update_iv_history(root: str, current_iv: float):
+    if root not in iv_history:
+        iv_history[root] = deque(maxlen=CFG["iv_rank_lookback"])
+    iv_history[root].append(current_iv)
+
+def get_iv_rank(root: str, current_iv: float) -> float:
+    """
+    IV Rank = (current IV - 52w low) / (52w high - 52w low) × 100
+    Here we use the rolling window instead of 52 weeks.
+    Returns 0–100. High rank = expensive premiums.
+    """
+    hist = iv_history.get(root, deque())
+    if len(hist) < 5:
+        return 50.0   # neutral default when insufficient history
+    lo, hi = min(hist), max(hist)
+    if hi == lo:
+        return 50.0
+    return (current_iv - lo) / (hi - lo) * 100
 
 # ══════════════════════════════════════════════════════════
 #  AI BRAIN  —  Claude PRIMARY, Ollama FALLBACK
@@ -640,20 +704,18 @@ def _call_claude(prompt: str) -> Optional[str]:
     if not _can_call_claude():
         return None
     try:
-        client  = anthropic.Anthropic(api_key=CFG["anthropic_key"])
-        message = client.messages.create(
-            model=CFG["claude_model"],
-            max_tokens=10,
+        msg = anthropic.Anthropic(api_key=CFG["anthropic_key"]).messages.create(
+            model=CFG["claude_model"], max_tokens=10,
             messages=[{"role": "user", "content": prompt}],
         )
-        raw = message.content[0].text.strip().upper()
+        raw = msg.content[0].text.strip().upper()
         claude_calls.append(time.time())
-        for word in ["BUY", "SELL", "HOLD"]:
-            if word in raw:
-                return word
+        for w in ("BUY", "SELL", "HOLD"):
+            if w in raw:
+                return w
         return "HOLD"
     except Exception as e:
-        log.warning(f"Claude API error: {e}")
+        log.warning(f"Claude error: {e}")
         return None
 
 def _call_local_llm(prompt: str) -> Optional[str]:
@@ -670,70 +732,60 @@ def _call_local_llm(prompt: str) -> Optional[str]:
         log.debug(f"Local LLM error: {e}")
         return None
 
-def ask_ai(signal: Dict[str, Any], df1_tail: str, df5_tail: str,
-           option_sym: str = "", premium: float = 0) -> Tuple[str, str]:
-    """
-    Options-aware AI prompt. Returns (decision, brain_used).
-    Decision: BUY (enter option), SELL (exit if holding), HOLD
-    """
-    root = CFG["indices"].get(signal["symbol"], signal["symbol"])
-    lot  = CFG["lot_sizes"].get(root, 25)
-    expiry_info = ""
-    if root in active_options:
-        exp = active_options[root].get("expiry")
-        if exp:
-            days_to_expiry = (exp - datetime.date.today()).days
-            expiry_info = f"Days to expiry: {days_to_expiry}"
+def ask_ai(sig: Dict[str, Any], df1_tail: str, df5_tail: str,
+           opt_sym: str, premium: float) -> Tuple[str, str]:
+    root   = CFG["indices"].get(sig["symbol"], sig["symbol"])
+    lot    = CFG["lot_sizes"].get(root, 25)
+    regime = sig.get("regime", "UNKNOWN")
+    rp     = regime_params_by_regime(regime)
 
-    prompt = f"""You are an expert intraday options trader on NSE (India).
-Analyze the index data and decide whether to BUY, SELL (exit), or HOLD.
+    prompt = f"""You are an expert intraday NSE options trader. Current market regime: {regime}.
+{rp['description']}
 
-Index   : {signal['symbol']}
-Price   : ₹{signal['price']:.2f}
-Option  : {option_sym or 'N/A'}
-Premium : ₹{premium:.2f} per share (lot={lot} shares)
-{expiry_info}
+Index   : {sig['symbol']}  @ ₹{sig['price']:.2f}
+Option  : {opt_sym or 'N/A'}  |  Premium ₹{premium:.2f}  |  Lot {lot}
 
-SIGNAL SCORES (index-level, 0–8 per timeframe):
-  1-min  Buy={signal['score_1m_buy']}/8  Sell={signal['score_1m_sell']}/8  RSI={signal['rsi_1m']}  VWAP={signal['vwap_1m']}
-  5-min  Buy={signal['score_5m_buy']}/8  Sell={signal['score_5m_sell']}/8  RSI={signal['rsi_5m']}  VWAP={signal['vwap_5m']}
-  Confidence  : {signal['confidence']}
-  EMA cross   : 1m={signal['ema_cross_1m']}  5m={signal['ema_cross_5m']}
-  Fake breakout: {signal['fake_reason'] or 'None'}
+REGIME  : {regime}
+ADX(1m) : {sig.get('adx_1m', '?')}  (>20 = trending, <20 = choppy)
+ADX(5m) : {sig.get('adx_5m', '?')}
+Supertrend direction: {sig.get('supertrend_dir', '?')}  (1=bullish, -1=bearish)
 
-Last 8 candles — 1-min index OHLCV:
+SIGNAL SCORES (0–10 each timeframe):
+  1-min  Buy={sig['score_1m_buy']} Sell={sig['score_1m_sell']}  RSI={sig['rsi_1m']}
+  5-min  Buy={sig['score_5m_buy']} Sell={sig['score_5m_sell']}  RSI={sig['rsi_5m']}
+  Confidence: {sig['confidence']}
+  Fake breakout: {sig.get('fake_reason') or 'None'}
+
+Last 8 × 1-min INDEX candles:
 {df1_tail}
 
-Last 8 candles — 5-min index OHLCV:
+Last 8 × 5-min INDEX candles:
 {df5_tail}
 
-Open positions: {len(open_positions)} | Capital: ₹{CFG['capital']:,}
+Open positions: {len(open_positions)}  Session P&L: ₹{session_pnl:.0f}
 
-TRADING RULES:
-  - We BUY options, never short (unlimited risk).
-  - Only BUY CE on strong bullish signal; BUY PE on strong bearish signal.
-  - Reject if fake_breakout flags > 0.
-  - Reject if premium is too high (>₹{CFG['max_premium']}) or too low (<₹{CFG['min_premium']}).
-  - Prefer 5-min trend direction when timeframes conflict.
-  - SELL means EXIT a currently held position.
-  - Never hold past 3:10 PM IST.
-  - Consider theta decay — avoid buying if expiry < 2 days and it's not morning.
+REGIME-SPECIFIC RULES:
+  {regime}: SL={rp['sl_pct']*100:.0f}%  Target={rp['target_pct']*100:.0f}%  prefer={rp['preferred_dir']}
 
-Reply with EXACTLY one word: BUY, SELL, or HOLD."""
+GENERAL RULES:
+- BUY options only (no shorting/writing).
+- BUY CE on bullish index; BUY PE on bearish index.
+- SELL = EXIT a held position.
+- BULL/BEAR: confirm trend with ADX>20 AND Supertrend direction.
+- SIDEWAYS: only enter on VWAP band touch + reversal candle.
+- Skip if fake breakout flags present.
+- Never enter after 2:45 PM IST.
+- High theta decay if expiry ≤ 2 days.
+
+Reply with EXACTLY one word: BUY  SELL  or  HOLD"""
 
     if using_claude():
         result = _call_claude(prompt)
-        if result is not None:
+        if result:
             return result, "CLAUDE"
-        log.warning("Claude failed — trying local LLM.")
-        result = _call_local_llm(prompt)
-        return (result or "HOLD"), "LOCAL(emergency)"
-
+        return (_call_local_llm(prompt) or "HOLD"), "LOCAL(emergency)"
     result = _call_local_llm(prompt)
-    if result is not None:
-        return result, f"LOCAL/{CFG['local_llm_model']}"
-
-    return "HOLD", "NONE"
+    return (result or "HOLD"), f"LOCAL/{CFG['local_llm_model']}"
 
 # ══════════════════════════════════════════════════════════
 #  CONNECTIVITY WATCHDOG
@@ -748,145 +800,186 @@ class ConnectivityWatchdog(threading.Thread):
         while True:
             try:
                 urllib.request.urlopen("https://api.anthropic.com", timeout=3)
-                was_offline = not self.online
-                self.online = True
-                if was_offline:
+                if not self.online:
+                    self.online = True
                     CFG["_use_local_llm"] = False
-                    log.info("🌐 Internet restored. Brain → Claude.")
+                    log.info("🌐 Internet restored — brain back to Claude.")
             except Exception:
-                was_online = self.online
-                self.online = False
-                if was_online:
+                if self.online:
+                    self.online = False
                     CFG["_use_local_llm"] = True
-                    log.warning("🔌 Internet DOWN. Brain → local LLM.")
+                    log.warning("🔌 Internet DOWN — brain switched to Ollama.")
             time.sleep(5)
 
 watchdog = ConnectivityWatchdog()
 
 # ══════════════════════════════════════════════════════════
-#  ORDER MANAGEMENT  (options-specific sizing)
+#  OPTION SELECTOR
+# ══════════════════════════════════════════════════════════
+def get_live_option(root: str, direction: str) -> Optional[str]:
+    if root not in active_options:
+        return None
+    index_name = next((k for k, v in CFG["indices"].items() if v == root), None)
+    ltp_index  = index_prices.get(index_name or "", 0)
+
+    if ltp_index > 0:
+        step   = CFG["strike_step"].get(root, 50)
+        rp     = regime_params(index_name or "")
+        offset = rp.get("otm_offset", 0)
+        atm    = round(ltp_index / step) * step
+        target_strike = (atm + offset * step) if direction == "CE" else (atm - offset * step)
+        for tok, sym in token_sym.items():
+            if not sym.startswith(root) or not sym.endswith(direction):
+                continue
+            if str(int(target_strike)) in sym:
+                ltp_opt = live_ticks.get(tok, {}).get("last_price", 0)
+                if ltp_opt and not (CFG["min_premium"] <= ltp_opt <= CFG["max_premium"]):
+                    return None
+                return sym
+
+    return active_options[root].get(direction)
+
+# ══════════════════════════════════════════════════════════
+#  ORDER MANAGEMENT
 # ══════════════════════════════════════════════════════════
 def calc_lots(premium: float, root: str) -> int:
-    """
-    How many lots to buy.
-    Risk = premium × lot_size × lots ≤ capital × risk_per_trade
-    """
-    lot_size   = CFG["lot_sizes"].get(root, 25)
-    max_risk   = CFG["capital"] * CFG["risk_per_trade"]
-    # Each lot costs: premium × lot_size
-    cost_per_lot = premium * lot_size
-    if cost_per_lot <= 0:
-        return 0
-    lots = math.floor(max_risk / cost_per_lot)
-    return max(1, min(lots, CFG["max_lots"]))
+    lot_size = CFG["lot_sizes"].get(root, 25)
+    max_risk = CFG["capital"] * CFG["risk_per_trade"]
+    if premium * lot_size <= 0:
+        return 1
+    return max(1, min(int(max_risk / (premium * lot_size)), CFG["max_lots"]))
 
-def place_buy(kite: KiteConnect, option_sym: str, root: str,
-              index_price: float, brain: str = "ALGO"):
-    """Buy an options contract (CE or PE)."""
-    if option_sym in open_positions:
+def place_buy(kite: KiteConnect, opt_sym: str, root: str,
+              index_price: float, brain: str = "ALGO", regime: str = "SIDEWAYS"):
+    global session_pnl, consecutive_losses, cooldown_until, daily_stopped
+
+    if not can_enter():
+        return
+    if opt_sym in open_positions:
         return
 
-    tok     = sym_token.get(option_sym)
-    premium = live_ticks.get(tok, {}).get("last_price", 0) if tok else 0
-    if premium <= 0:
-        log.warning(f"  Cannot buy {option_sym} — no live premium data.")
-        return
-    if premium < CFG["min_premium"] or premium > CFG["max_premium"]:
-        log.warning(f"  Skipping {option_sym}: premium ₹{premium:.0f} outside guard rails.")
+    tok     = sym_token.get(opt_sym, 0)
+    premium = live_ticks.get(tok, {}).get("last_price", 0)
+    if not (CFG["min_premium"] <= premium <= CFG["max_premium"]):
+        log.warning(f"  {opt_sym} premium ₹{premium:.0f} outside rails — skip.")
         return
 
+    rp       = regime_params_by_regime(regime)
     lot_size = CFG["lot_sizes"].get(root, 25)
     lots     = calc_lots(premium, root)
     qty      = lots * lot_size
-    sl       = round(premium * (1 - CFG["sl_pct"]), 2)
-    target   = round(premium * (1 + CFG["target_pct"]), 2)
-    cost     = premium * qty
+    sl       = round(premium * (1 - rp["sl_pct"]),     2)
+    target   = round(premium * (1 + rp["target_pct"]), 2)
+    # Scaled exit: first target at 1:1 R:R
+    scale_target = round(premium * (1 + rp["sl_pct"]), 2)
 
     if PAPER_TRADE:
-        log.info(f"📝 [PAPER] BUY  {option_sym:30} lots={lots} qty={qty:4} "
-                 f"premium=₹{premium:.2f}  SL=₹{sl}  T=₹{target}  [{brain}]"
-                 f"  Cost≈₹{cost:.0f}")
         oid = f"PAPER_{int(time.time())}"
+        log.info(f"📝 [PAPER|{regime}] BUY  {opt_sym:32} lots={lots} "
+                 f"prem=₹{premium:.2f}  SL=₹{sl}  T=₹{target}  [{brain}]")
     else:
         try:
             oid = kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=option_sym,
-                transaction_type=kite.TRANSACTION_TYPE_BUY,
-                quantity=qty,
-                order_type=kite.ORDER_TYPE_MARKET,
-                product=kite.PRODUCT_MIS,
+                variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
+                tradingsymbol=opt_sym, transaction_type=kite.TRANSACTION_TYPE_BUY,
+                quantity=qty, order_type=kite.ORDER_TYPE_MARKET, product=kite.PRODUCT_MIS,
             )
-            log.info(f"✅ BUY  {option_sym:30} lots={lots} qty={qty:4} "
-                     f"premium=₹{premium:.2f}  SL=₹{sl}  T=₹{target}  [{brain}]")
+            log.info(f"✅ [{regime}] BUY  {opt_sym:32} lots={lots} "
+                     f"prem=₹{premium:.2f}  SL=₹{sl}  T=₹{target}  [{brain}]")
         except Exception as e:
-            log.error(f"Buy order FAILED {option_sym}: {e}")
+            log.error(f"Buy FAILED {opt_sym}: {e}")
             return
 
-    jid = journal.log_entry(
-        symbol=option_sym, qty=qty, price=premium,
-        sl=sl, target=target, ai_decision=brain,
-        extra={"index_price": index_price, "lots": lots, "root": root}
-    )
-    open_positions[option_sym] = {
+    jid = journal.log_entry(opt_sym, qty, premium, sl, target, ai_decision=brain)
+    open_positions[opt_sym] = {
         "qty": qty, "entry": premium, "sl": sl, "target": target,
+        "scale_target": scale_target, "scaled_out": False,
         "peak": premium, "order_id": oid, "journal_id": jid,
-        "root": root, "lots": lots, "cost": cost,
+        "root": root, "lots": lots, "regime": regime,
+        "index_price_at_entry": index_price,
     }
 
-def place_sell(kite: KiteConnect, option_sym: str, reason: str = "signal"):
-    """Sell (exit) an options position."""
-    if option_sym not in open_positions:
+def place_sell(kite: KiteConnect, opt_sym: str, reason: str = "signal",
+               partial_qty: int = 0):
+    global session_pnl, consecutive_losses, cooldown_until, daily_stopped
+
+    if opt_sym not in open_positions:
         return
-    pos = open_positions[option_sym]
-    tok = sym_token.get(option_sym)
-    current_premium = live_ticks.get(tok, {}).get("last_price", pos["entry"]) if tok else pos["entry"]
-    pnl = (current_premium - pos["entry"]) * pos["qty"]
+    pos      = open_positions[opt_sym]
+    tok      = sym_token.get(opt_sym, 0)
+    cur_prem = live_ticks.get(tok, {}).get("last_price", pos["entry"])
+    sell_qty = partial_qty if partial_qty else pos["qty"]
+    pnl      = (cur_prem - pos["entry"]) * sell_qty
 
     if PAPER_TRADE:
-        log.info(f"📝 [PAPER] SELL {option_sym:30} reason={reason:18} "
-                 f"exit=₹{current_premium:.2f}  P&L≈₹{pnl:.0f}")
+        log.info(f"📝 [PAPER] {'PARTIAL ' if partial_qty else ''}SELL "
+                 f"{opt_sym:32} reason={reason:20} exit=₹{cur_prem:.2f}  P&L=₹{pnl:.0f}")
     else:
         try:
             kite.place_order(
-                variety=kite.VARIETY_REGULAR,
-                exchange=kite.EXCHANGE_NFO,
-                tradingsymbol=option_sym,
-                transaction_type=kite.TRANSACTION_TYPE_SELL,
-                quantity=pos["qty"],
-                order_type=kite.ORDER_TYPE_MARKET,
+                variety=kite.VARIETY_REGULAR, exchange=kite.EXCHANGE_NFO,
+                tradingsymbol=opt_sym, transaction_type=kite.TRANSACTION_TYPE_SELL,
+                quantity=sell_qty, order_type=kite.ORDER_TYPE_MARKET,
                 product=kite.PRODUCT_MIS,
             )
-            log.info(f"🔴 SELL {option_sym:30} reason={reason:18} P&L≈₹{pnl:.0f}")
+            log.info(f"🔴 {'PARTIAL ' if partial_qty else ''}SELL "
+                     f"{opt_sym:32} reason={reason:20} P&L=₹{pnl:.0f}")
         except Exception as e:
-            log.error(f"Sell order FAILED {option_sym}: {e}")
+            log.error(f"Sell FAILED {opt_sym}: {e}")
             return
 
-    if "journal_id" in pos:
-        journal.log_exit(pos["journal_id"], current_premium, reason, pnl)
-        journal.update_daily_summary()
-    del open_positions[option_sym]
+    session_pnl += pnl
+
+    if not partial_qty:
+        # Full exit
+        if pnl < 0:
+            consecutive_losses += 1
+            if consecutive_losses >= CFG["cooldown_after_loss"]:
+                cooldown_until = datetime.datetime.now() + datetime.timedelta(minutes=15)
+                log.warning(f"⏸  {consecutive_losses} consecutive losses — 15min cooldown.")
+        else:
+            consecutive_losses = 0
+
+        if session_pnl <= -CFG["max_daily_loss"]:
+            daily_stopped = True
+            log.warning(f"🛑 Daily loss limit hit (₹{session_pnl:.0f}) — no new trades today.")
+
+        if "journal_id" in pos:
+            journal.log_exit(pos["journal_id"], cur_prem, reason, pnl)
+            journal.update_daily_summary()
+        del open_positions[opt_sym]
+    else:
+        # Partial exit — update remaining qty
+        open_positions[opt_sym]["qty"] -= sell_qty
+        open_positions[opt_sym]["scaled_out"] = True
+        if "journal_id" in pos:
+            journal.log_exit(pos["journal_id"], cur_prem, f"{reason}(partial)", pnl)
 
 def check_positions(kite: KiteConnect):
-    """Check SL / target / trailing SL for all open option positions."""
+    """SL, target, trailing SL, and scaled exit checks."""
     for sym, pos in list(open_positions.items()):
-        tok = sym_token.get(sym)
-        if not tok:
-            continue
+        tok = sym_token.get(sym, 0)
         ltp = live_ticks.get(tok, {}).get("last_price", 0)
         if not ltp:
             continue
+        pct = (ltp - pos["entry"]) / pos["entry"]
 
-        profit_pct = (ltp - pos["entry"]) / pos["entry"]
+        # ── Scaled exit: close half at 1:1 ───────────────
+        if (CFG["scale_exit"] and not pos["scaled_out"]
+                and ltp >= pos.get("scale_target", 1e9) and pos["qty"] > 1):
+            half_qty = max(1, pos["qty"] // 2)
+            place_sell(kite, sym, "scale-1:1", partial_qty=half_qty)
+            # Widen trail trigger after partial close
+            open_positions[sym]["trail_trigger_pct"] = pos.get("trail_trigger_pct", CFG["trail_trigger_pct"]) * 0.5
+            continue
 
-        # Trailing SL on option premium
-        if CFG["trail_sl"] and profit_pct > CFG["trail_trigger_pct"]:
+        # ── Trailing SL ───────────────────────────────────
+        trig = pos.get("trail_trigger_pct", CFG["trail_trigger_pct"])
+        if CFG["trail_sl"] and pct > trig:
             open_positions[sym]["peak"] = max(ltp, pos["peak"])
-            new_sl = round(pos["entry"] * (1 + CFG["trail_trigger_pct"] * 0.5), 2)
+            new_sl = round(pos["entry"] * (1 + trig * 0.5), 2)
             if new_sl > pos["sl"]:
                 open_positions[sym]["sl"] = new_sl
-                log.debug(f"Trail SL: {sym} → ₹{new_sl}")
 
         if ltp <= pos["sl"]:
             place_sell(kite, sym, "stop-loss")
@@ -894,7 +987,7 @@ def check_positions(kite: KiteConnect):
             place_sell(kite, sym, "target")
 
 def squareoff_all(kite: KiteConnect):
-    log.info("⏰ EOD square-off — exiting all options positions.")
+    log.info("⏰ EOD square-off.")
     for sym in list(open_positions.keys()):
         place_sell(kite, sym, "eod-squareoff")
 
@@ -904,44 +997,35 @@ def squareoff_all(kite: KiteConnect):
 def start_ticker(kite: KiteConnect, tokens: List[int]):
     ticker = KiteTicker(CFG["api_key"], kite.access_token)
 
-    def on_ticks(ws: Any, ticks: List[Dict[str, Any]]) -> None:
+    def on_ticks(ws: Any, ticks: List[Dict]) -> None:
         for tick in ticks:
-            t = tick["instrument_token"]
-            live_ticks[t] = tick
+            t   = tick["instrument_token"]
             sym = token_sym.get(t, "")
-
-            # Update index price if this tick is an index
+            live_ticks[t] = tick
             if sym in CFG["indices"]:
                 index_prices[sym] = tick.get("last_price", 0)
+                b = builders.setdefault(t, CandleBuilder(t))
+                b.add_tick(tick.get("last_price", 0),
+                           tick.get("volume_traded", 0),
+                           datetime.datetime.now())
 
-            # Build candles only for index tokens (signals run on index)
-            if sym in CFG["indices"]:
-                b = builders.setdefault(t, DualCandleBuilder(t))
-                b.add_tick(
-                    price  = tick.get("last_price", 0),
-                    volume = tick.get("volume_traded", 0),
-                    ts     = datetime.datetime.now(),
-                )
-
-    def on_connect(ws: Any, response: Any) -> None:
+    def on_connect(ws, _):
         log.info("WebSocket connected.")
         ws.subscribe(tokens)
         ws.set_mode(ws.MODE_FULL, tokens)
 
-    def on_close(ws: Any, code: int, reason: str) -> None:
+    def on_close(ws, code, reason):
         log.warning(f"WebSocket closed ({code}): {reason}. Reconnecting…")
 
-    def on_error(ws: Any, code: int, reason: str) -> None:
+    def on_error(ws, code, reason):
         log.error(f"WebSocket error ({code}): {reason}")
 
     ticker.on_ticks   = on_ticks
     ticker.on_connect = on_connect
     ticker.on_close   = on_close
     ticker.on_error   = on_error
-
-    t = threading.Thread(target=ticker.connect, kwargs={"threaded": True}, daemon=True)
-    t.start()
-    log.info(f"Ticker started for {len(tokens)} instruments.")
+    threading.Thread(target=ticker.connect, kwargs={"threaded": True}, daemon=True).start()
+    log.info(f"Ticker started for {len(tokens)} tokens.")
     return ticker
 
 # ══════════════════════════════════════════════════════════
@@ -953,103 +1037,129 @@ def strategy_loop(kite: KiteConnect):
         return
 
     check_positions(kite)
-    log.info(f"── Scan [{brain_name()}] | positions={len(open_positions)} ──")
+
+    regime_summary = {k: current_regime.get(k, "?") for k in CFG["indices"]}
+    log.info(f"── Scan [{brain_name()}] | open={len(open_positions)} "
+             f"| P&L=₹{session_pnl:.0f} | regimes={regime_summary} ──")
+
+    if not can_enter() and not open_positions:
+        if daily_stopped:
+            log.warning("  Daily loss limit hit — no new entries.")
+        return
 
     for index_sym, root in CFG["indices"].items():
         if index_sym not in sym_token:
             continue
 
         sig    = generate_signal(index_sym)
+        regime = sig["regime"]
         action = sig["action"]
         brain  = "ALGO"
+        rp     = regime_params_by_regime(regime)
 
-        log.debug(f"{index_sym:12} 1m={sig['score_1m_buy']}/{sig['score_1m_sell']} "
-                  f"5m={sig['score_5m_buy']}/{sig['score_5m_sell']} → {action}")
+        log.debug(f"  {index_sym:12} regime={regime:8} "
+                  f"1m={sig['score_1m_buy']}/{sig['score_1m_sell']} "
+                  f"5m={sig['score_5m_buy']}/{sig['score_5m_sell']} "
+                  f"ADX={sig.get('adx_1m','?')} → {action}")
 
         # AMBIGUOUS → ask AI
         if action == "AMBIGUOUS":
-            token = sym_token.get(index_sym)
+            token = sym_token.get(index_sym, 0)
             df1_tail = df5_tail = "no data"
-            if token:
-                df1 = df_from_buf(tick_store_1m, token, CFG["data_quality_min_1m"])
-                if not df1.empty:
-                    df1 = compute_indicators(df1, CFG["ema_fast_1m"], CFG["ema_slow_1m"],
-                                             CFG["rsi_period_1m"], CFG["atr_period_1m"])
-                    df1_tail = df1.tail(8)[["open","high","low","close","volume","rsi","vwap"]].to_string()
-                df5 = df_from_buf(tick_store_5m, token, CFG["data_quality_min_5m"])
-                if not df5.empty:
-                    df5 = compute_indicators(df5, CFG["ema_fast_5m"], CFG["ema_slow_5m"],
-                                             CFG["rsi_period_5m"], CFG["atr_period_5m"])
-                    df5_tail = df5.tail(8)[["open","high","low","close","volume","rsi","vwap"]].to_string()
+            df1 = df_from_buf(tick_store_1m, token, CFG["data_quality_min_1m"])
+            if not df1.empty:
+                df1 = compute_indicators(df1, CFG["ema_fast_1m"], CFG["ema_slow_1m"],
+                                          CFG["rsi_period_1m"], CFG["atr_period_1m"])
+                df1_tail = df1.tail(8)[["open","high","low","close","volume","rsi","adx","vwap"]].to_string()
+            df5 = df_from_buf(tick_store_5m, token, CFG["data_quality_min_5m"])
+            if not df5.empty:
+                df5 = compute_indicators(df5, CFG["ema_fast_5m"], CFG["ema_slow_5m"],
+                                          CFG["rsi_period_5m"], CFG["atr_period_5m"])
+                df5_tail = df5.tail(8)[["open","high","low","close","volume","rsi","adx","vwap"]].to_string()
 
-            # Determine option type for context
-            if "weak_buy" in sig["confidence"] or sig["total_buy"] > sig["total_sell"]:
-                opt_type = "CE"
-            else:
-                opt_type = "PE"
-            opt_sym  = get_live_option(root, opt_type) or ""
-            opt_tok  = sym_token.get(opt_sym, 0)
-            premium  = live_ticks.get(opt_tok, {}).get("last_price", 0)
-
+            opt_dir = "CE" if "buy" in sig["confidence"] else "PE"
+            if regime == "BULL":  opt_dir = "CE"
+            if regime == "BEAR":  opt_dir = "PE"
+            opt_sym = get_live_option(root, opt_dir) or ""
+            opt_tok = sym_token.get(opt_sym, 0)
+            premium = live_ticks.get(opt_tok, {}).get("last_price", 0)
             action, brain = ask_ai(sig, df1_tail, df5_tail, opt_sym, premium)
-            log.info(f"AI ({brain}) → {action} for {index_sym} [{opt_type}]")
+            log.info(f"  AI ({brain}) [{regime}] → {action} for {index_sym}")
 
-        # ── ENTER: BUY CE (bullish) ──────────────────────
-        if action == "BUY":
-            if sig.get("fake_breakout"):
-                log.info(f"⚠️  Skipping {index_sym} CE — fake breakout: {sig['fake_reason']}")
+        # ── ENTRY ─────────────────────────────────────────
+        if action in ("BUY", "SELL") and can_enter():
+            if sig["fake_breakout"]:
+                log.info(f"  ⚠  Fake breakout [{regime}]: {sig['fake_reason']}")
                 continue
-            opt_sym = get_live_option(root, "CE")
-            if opt_sym and opt_sym not in open_positions:
-                place_buy(kite, opt_sym, root, sig["price"], brain=brain)
 
-        # ── ENTER: BUY PE (bearish) ──────────────────────
-        elif action == "SELL":
-            if sig.get("fake_breakout"):
-                log.info(f"⚠️  Skipping {index_sym} PE — fake breakout: {sig['fake_reason']}")
+            # In SIDEWAYS, enforce stricter ADX check
+            if regime == "SIDEWAYS" and (sig.get("adx_1m") or 0) < 15:
+                log.debug(f"  {index_sym} sideways ADX too low — skip.")
                 continue
-            opt_sym = get_live_option(root, "PE")
-            if opt_sym and opt_sym not in open_positions:
-                place_buy(kite, opt_sym, root, sig["price"], brain=brain)
 
-        # ── EXIT: close any open position on opposite signal
-        elif action == "HOLD":
-            # Optionally exit positions if signal has reversed strongly
-            for held_sym in list(open_positions.keys()):
-                if root in held_sym:
-                    pos_type = "CE" if held_sym.endswith("CE") else "PE"
-                    # Exit CE on strong sell, exit PE on strong buy
-                    if (pos_type == "CE" and sig["total_sell"] > sig["total_buy"] + 3) or \
-                       (pos_type == "PE" and sig["total_buy"] > sig["total_sell"] + 3):
-                        log.info(f"  Signal reversed — exiting {held_sym}")
-                        place_sell(kite, held_sym, "signal-reversal")
+            direction = "CE" if action == "BUY" else "PE"
+
+            # Regime preference override
+            if regime == "BULL" and direction == "PE":
+                log.debug(f"  BULL regime — skipping PE entry.")
+                continue
+            if regime == "BEAR" and direction == "CE":
+                log.debug(f"  BEAR regime — skipping CE entry.")
+                continue
+
+            opt_sym = get_live_option(root, direction)
+            if opt_sym and opt_sym not in open_positions:
+                place_buy(kite, opt_sym, root, sig["price"], brain, regime)
+
+        # ── REVERSAL EXIT ─────────────────────────────────
+        for held_sym in list(open_positions.keys()):
+            if root not in held_sym:
+                continue
+            pos_type = "CE" if held_sym.endswith("CE") else "PE"
+            # Exit on strong reversal signal
+            reversal_gap = 4 if regime == "SIDEWAYS" else 5
+            if ((pos_type == "CE" and sig["total_sell"] > sig["total_buy"] + reversal_gap) or
+                    (pos_type == "PE" and sig["total_buy"] > sig["total_sell"] + reversal_gap)):
+                log.info(f"  Signal reversed [{regime}] — exiting {held_sym}")
+                place_sell(kite, held_sym, "signal-reversal")
 
 # ══════════════════════════════════════════════════════════
-#  DAILY SUMMARY
+#  DAILY RESET
+# ══════════════════════════════════════════════════════════
+def daily_reset():
+    global session_pnl, consecutive_losses, cooldown_until, daily_stopped
+    session_pnl        = 0.0
+    consecutive_losses = 0
+    cooldown_until     = None
+    daily_stopped      = False
+    current_regime.clear()
+    log.info("🔄 Daily state reset.")
+
+# ══════════════════════════════════════════════════════════
+#  SUMMARY
 # ══════════════════════════════════════════════════════════
 def print_summary():
-    log.info("─" * 60)
-    log.info("DAILY SUMMARY")
-    open_pnl = 0.0
+    log.info("─" * 65)
+    log.info(f"DAILY SUMMARY | Session P&L: ₹{session_pnl:.0f}")
     for sym, pos in open_positions.items():
-        tok = sym_token.get(sym)
-        if not tok: continue
+        tok  = sym_token.get(sym, 0)
         ltp  = live_ticks.get(tok, {}).get("last_price", pos["entry"])
-        pnl  = (ltp - pos["entry"]) * pos["qty"]
-        open_pnl += pnl
-        log.info(f"  OPEN  {sym:30} qty={pos['qty']} prem=₹{ltp:.2f} P&L=₹{pnl:.0f}")
-    log.info(f"  Total unrealised P&L: ₹{open_pnl:.0f}")
-    log.info("─" * 60)
+        ur   = (ltp - pos["entry"]) * pos["qty"]
+        log.info(f"  OPEN {sym:32} regime={pos.get('regime','?'):8} "
+                 f"lots={pos['lots']} prem=₹{ltp:.2f} unrealised=₹{ur:.0f}")
+    log.info(f"  Regime snapshot: {current_regime}")
+    log.info("─" * 65)
 
 # ══════════════════════════════════════════════════════════
 #  MAIN
 # ══════════════════════════════════════════════════════════
 def main():
-    mode_str = "PAPER TRADE" if PAPER_TRADE else "LIVE TRADE"
+    mode = "PAPER TRADE ⚠ no real orders" if PAPER_TRADE else "LIVE TRADE 🔴 real money"
     log.info("=" * 65)
-    log.info(f"  Zerodha AI Options Bot  |  [{mode_str}]")
+    log.info(f"  Trade_Claude v2 — Multi-Regime Options Bot  [{mode}]")
+    log.info(f"  BULL: CE | BEAR: PE | SIDEWAYS: breakouts only")
+    log.info(f"  ADX + Supertrend + VWAP bands + Scaled exit")
     log.info(f"  Claude PRIMARY  |  Ollama FALLBACK")
-    log.info(f"  Dual timeframe: 1-min (scalp) + 5-min (trend) on INDEX")
     log.info("=" * 65)
 
     kite   = get_kite()
@@ -1057,21 +1167,19 @@ def main():
 
     watchdog.start()
     start_ticker(kite, tokens)
-    time.sleep(5)   # Allow initial ticks to arrive
+    time.sleep(5)
 
     schedule.every(60).seconds.do(strategy_loop,  kite=kite)
     schedule.every(10).seconds.do(check_positions, kite=kite)
     schedule.every().day.at(CFG["squareoff_time"]).do(squareoff_all, kite=kite)
+    schedule.every().day.at("09:15").do(daily_reset)
     schedule.every().day.at("15:20").do(print_summary)
 
-    log.info(f"  Capital        : ₹{CFG['capital']:,}")
-    log.info(f"  SL / Target    : {CFG['sl_pct']*100:.0f}% / {CFG['target_pct']*100:.0f}% of premium")
-    log.info(f"  Max lots/trade : {CFG['max_lots']}")
-    log.info(f"  Premium range  : ₹{CFG['min_premium']}–₹{CFG['max_premium']}")
-    log.info(f"  OTM offset     : {CFG['otm_offset']} strikes")
-    log.info(f"  Indices        : {list(CFG['indices'].keys())}")
-    log.info(f"  Primary brain  : Claude ({CFG['claude_model']})")
-    log.info(f"  Fallback brain : Ollama/{CFG['local_llm_model']}")
+    log.info(f"  Capital       : ₹{CFG['capital']:,}")
+    log.info(f"  Risk/trade    : {CFG['risk_per_trade']*100:.0f}%")
+    log.info(f"  Max daily loss: ₹{CFG['max_daily_loss']:,}")
+    log.info(f"  Scaled exit   : {CFG['scale_exit']} (50% at 1:1 R:R)")
+    log.info(f"  Cooldown      : after {CFG['cooldown_after_loss']} consecutive losses")
     log.info("Press Ctrl+C to stop.\n")
 
     strategy_loop(kite)

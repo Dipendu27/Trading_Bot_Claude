@@ -12,7 +12,6 @@ Claude AI to validate ambiguous setups before placing orders.
 |------|---------|
 | `bot.py` | Main bot — run this every morning |
 | `journal.py` | SQLite trade journal + P&L tracker |
-| `dashboard.py` | Live terminal UI (run in second terminal) |
 | `web_dashboard.py` | Browser trading terminal with Kite market data |
 | `backtest.py` | Test strategy on historical Kite data |
 | `setup.py` | First-time setup wizard |
@@ -28,16 +27,13 @@ python setup.py
 # 2. Every morning before 9:15 AM
 python bot.py
 
-# 3. Optional: live dashboard in another terminal
-python dashboard.py
-
-# 4. Optional: browser monitor
+# 3. Optional: browser monitor
 python web_dashboard.py
 
-# 5. View today's trades
+# 4. View today's trades
 python journal.py
 
-# 6. Backtest before going live
+# 5. Backtest before going live
 python backtest.py --symbol RELIANCE --days 30
 ```
 

@@ -1,8 +1,9 @@
 """
-Trade Journal — SQLite-backed P&L tracker
-Automatically imported by bot.py; can also be run standalone for reports.
+Trade Journal — SQLite-backed P&L tracker for Trade_Claude
+============================================================
+Imported by bot.py automatically. Also run standalone for reports.
 
-Usage (standalone):
+Usage:
     python journal.py              # today's summary
     python journal.py --all        # all-time summary
     python journal.py --csv        # export to trades.csv
@@ -12,9 +13,9 @@ import sqlite3, datetime, argparse, csv, os
 
 DB_FILE = "trades.db"
 
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 #  SCHEMA
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 def init_db():
     con = sqlite3.connect(DB_FILE)
     con.execute("""
@@ -24,12 +25,12 @@ def init_db():
             symbol      TEXT,
             side        TEXT,        -- BUY / SELL
             qty         INTEGER,
-            price       REAL,
+            price       REAL,        -- entry premium (options) or entry price (equity)
             sl          REAL,
             target      REAL,
             close_price REAL,
             close_time  TEXT,
-            reason      TEXT,        -- signal / stop-loss / target / eod-squareoff
+            reason      TEXT,        -- signal / stop-loss / target / eod-squareoff / signal-reversal
             pnl         REAL,
             ai_decision TEXT,        -- CLAUDE / LOCAL / ALGO
             created_at  TEXT DEFAULT (datetime('now','localtime'))
@@ -42,7 +43,7 @@ def init_db():
             winners     INTEGER,
             losers      INTEGER,
             gross_pnl   REAL,
-            charges     REAL,        -- brokerage estimate
+            charges     REAL,
             net_pnl     REAL,
             win_rate    REAL
         )
@@ -50,10 +51,12 @@ def init_db():
     con.commit()
     con.close()
 
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 #  WRITE
-# ─────────────────────────────────────────────
-def log_entry(symbol, qty, price, sl, target, ai_decision="ALGO"):
+# ──────────────────────────────────────────────
+def log_entry(symbol: str, qty: int, price: float, sl: float, target: float,
+              ai_decision: str = "ALGO", **kwargs) -> int:
+    """Log a new trade entry. Returns the row id."""
     con = sqlite3.connect(DB_FILE)
     con.execute("""
         INSERT INTO trades (date, symbol, side, qty, price, sl, target, ai_decision)
@@ -64,7 +67,7 @@ def log_entry(symbol, qty, price, sl, target, ai_decision="ALGO"):
     con.close()
     return last_id
 
-def log_exit(trade_id, close_price, reason, pnl):
+def log_exit(trade_id: int, close_price: float, reason: str, pnl: float):
     con = sqlite3.connect(DB_FILE)
     con.execute("""
         UPDATE trades
@@ -84,13 +87,13 @@ def update_daily_summary():
     if not rows:
         con.close()
         return
-    pnls     = [r[0] for r in rows]
-    winners  = sum(1 for p in pnls if p > 0)
-    losers   = sum(1 for p in pnls if p <= 0)
-    gross    = sum(pnls)
-    # Rough brokerage: ₹20 flat per order × 2 (entry+exit) × trades
-    charges  = len(pnls) * 40
-    net      = gross - charges
+    pnls    = [r[0] for r in rows]
+    winners = sum(1 for p in pnls if p > 0)
+    losers  = sum(1 for p in pnls if p <= 0)
+    gross   = sum(pnls)
+    # Options brokerage: ₹20 flat × 2 legs + STT ≈ ₹50 per trade (rough estimate)
+    charges = len(pnls) * 50
+    net     = gross - charges
     win_rate = winners / len(pnls) if pnls else 0
 
     con.execute("""
@@ -105,9 +108,9 @@ def update_daily_summary():
     con.commit()
     con.close()
 
-# ─────────────────────────────────────────────
-#  READ / REPORTS
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
+#  REPORTS
+# ──────────────────────────────────────────────
 def today_report():
     today = datetime.date.today().isoformat()
     con   = sqlite3.connect(DB_FILE)
@@ -117,24 +120,25 @@ def today_report():
     """, (today,)).fetchall()
     con.close()
 
-    print(f"\n{'─'*65}")
-    print(f"  Trade Journal — {today}")
-    print(f"{'─'*65}")
-    print(f"  {'Symbol':<12} {'Qty':>5} {'Entry':>8} {'Exit':>8} {'Reason':<14} {'P&L':>8}  AI")
-    print(f"{'─'*65}")
+    print(f"\n{'─'*80}")
+    print(f"  Trade Journal — {today}  (options mode)")
+    print(f"{'─'*80}")
+    print(f"  {'Symbol':<32} {'Qty':>5} {'Entry':>8} {'Exit':>8} {'Reason':<16} {'P&L':>8}  AI")
+    print(f"{'─'*80}")
     total = 0
-    for r in rows:
-        sym, qty, entry, exit_, reason, pnl, ai = r
+    for sym, qty, entry, exit_, reason, pnl, ai in rows:
         pnl   = pnl or 0
-        exit_ = f"₹{exit_:.2f}" if exit_ else "OPEN"
         total += pnl
-        print(f"  {sym:<12} {qty:>5} ₹{entry:>7.2f} {exit_:>8} {(reason or 'OPEN'):<14} ₹{pnl:>7.0f}  {ai}")
-    charges = len([r for r in rows if r[4]]) * 40
-    print(f"{'─'*65}")
-    print(f"  Gross P&L : ₹{total:.0f}")
-    print(f"  Est. charges: ₹{charges:.0f}")
-    print(f"  Net P&L   : ₹{total - charges:.0f}")
-    print(f"{'─'*65}\n")
+        exit_str = f"₹{exit_:.2f}" if exit_ else "OPEN"
+        print(f"  {sym:<32} {qty:>5} ₹{entry:>7.2f} {exit_str:>8} "
+              f"{(reason or 'OPEN'):<16} ₹{pnl:>7.0f}  {ai}")
+    closed = sum(1 for r in rows if r[3] is not None)
+    charges = closed * 50
+    print(f"{'─'*80}")
+    print(f"  Gross P&L     : ₹{total:.0f}")
+    print(f"  Est. charges  : ₹{charges:.0f}  ({closed} closed trades × ₹50)")
+    print(f"  Net P&L       : ₹{total - charges:.0f}")
+    print(f"{'─'*80}\n")
 
 def alltime_report():
     con  = sqlite3.connect(DB_FILE)
@@ -150,12 +154,10 @@ def alltime_report():
     print(f"  {'Date':<12} {'Trades':>6} {'W':>4} {'L':>4} {'Gross P&L':>11} {'Net P&L':>10} {'WR':>6}")
     print(f"{'─'*72}")
     total_net = 0
-    for r in rows:
-        date, trades, w, l, gross, net, wr = r
+    for date, trades, w, l, gross, net, wr in rows:
         total_net += net or 0
-        wr = wr or 0
-        display_wr = wr * 100 if wr <= 1 else wr
-        print(f"  {date:<12} {trades:>6} {w:>4} {l:>4} ₹{gross:>10.0f} ₹{net:>9.0f} {display_wr:>5.1f}%")
+        print(f"  {date:<12} {trades:>6} {w:>4} {l:>4} "
+              f"₹{gross:>10.0f} ₹{net:>9.0f} {wr*100:>5.1f}%")
     print(f"{'─'*72}")
     print(f"  Cumulative Net P&L: ₹{total_net:.0f}")
     print(f"{'─'*72}\n")
@@ -169,19 +171,18 @@ def export_csv():
         w = csv.writer(f)
         w.writerow(cols)
         w.writerows(rows)
-    print(f"Exported {len(rows)} trades to trades.csv")
+    print(f"Exported {len(rows)} trades → trades.csv")
 
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 #  INIT ON IMPORT
-# ─────────────────────────────────────────────
+# ──────────────────────────────────────────────
 init_db()
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
-    ap.add_argument("--all", action="store_true")
-    ap.add_argument("--csv", action="store_true")
+    ap.add_argument("--all", action="store_true", help="All-time summary")
+    ap.add_argument("--csv", action="store_true", help="Export to trades.csv")
     args = ap.parse_args()
-
     if args.all:
         alltime_report()
     elif args.csv:

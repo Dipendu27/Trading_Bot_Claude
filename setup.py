@@ -1,110 +1,85 @@
 #!/usr/bin/env python3
 """
-setup.py - First-time setup wizard for the Zerodha AI Bot.
-
-Run once:
+Trade_Claude — First-time Setup Wizard
+Run once before anything else:
     python setup.py
 """
 
-from __future__ import annotations
-
-import subprocess
-import sys
-from pathlib import Path
-
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-ENV_FILE = PROJECT_ROOT / ".env"
-
-
-def save_env(values: dict[str, str]) -> None:
-    existing: dict[str, str] = {}
-    if ENV_FILE.exists():
-        for line in ENV_FILE.read_text().splitlines():
-            if "=" not in line or line.strip().startswith("#"):
-                continue
-            key, value = line.split("=", 1)
-            existing[key.strip()] = value.strip().strip('"').strip("'")
-
-    for key, value in values.items():
-        if value:
-            existing[key] = value.strip()
-
-    ordered = [
-        "KITE_API_KEY",
-        "KITE_API_SECRET",
-        "ANTHROPIC_API_KEY",
-        "TRADE_CAPITAL",
-    ]
-    keys = ordered + sorted(key for key in existing if key not in ordered)
-    ENV_FILE.write_text("\n".join(f"{key}={existing[key]}" for key in keys if existing.get(key)) + "\n")
-
+import os, subprocess, sys
 
 print("""
-╔══════════════════════════════════════════════════╗
-║   Zerodha AI Bot - First-time Setup Wizard       ║
-╚══════════════════════════════════════════════════╝
+╔══════════════════════════════════════════════════════╗
+║         Trade_Claude — First-time Setup Wizard       ║
+║         Zerodha AI Options Bot (NFO)                 ║
+╚══════════════════════════════════════════════════════╝
 """)
 
-print("Step 1: Installing Python packages...")
-pkgs = ["kiteconnect", "anthropic", "pandas", "numpy", "schedule", "requests", "rich", "flask"]
+# ── Step 1: Install dependencies ─────────────────────
+print("Step 1 — Installing Python packages…")
+pkgs = ["kiteconnect", "anthropic", "pandas", "numpy",
+        "schedule", "requests"]
 subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet"] + pkgs)
-print("  Packages installed.\n")
+print("  ✅ Packages installed.\n")
 
-print("""Step 2: API key cost check
+# ── Step 2: Collect credentials ──────────────────────
+print("Step 2 — Enter your credentials (written into bot.py locally)\n")
+zerodha_key    = input("  Zerodha API Key      : ").strip()
+zerodha_secret = input("  Zerodha API Secret   : ").strip()
+anthropic_key  = input("  Anthropic API Key    : ").strip()
+capital_str    = input("  Capital per day ₹    (default 50000): ").strip() or "50000"
 
-  Zerodha Kite API Key/Secret:
-    - Personal Kite API tier is free for basic account/order APIs.
-    - This bot needs historical candles and live WebSocket ticks, so you need
-      Kite Connect: currently listed by Zerodha at INR 500/month.
+# ── Step 3: Patch bot.py ──────────────────────────────
+bot_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.py")
+if not os.path.exists(bot_path):
+    print(f"  ❌ bot.py not found at {bot_path}. Make sure setup.py is in the same folder.")
+    sys.exit(1)
 
-  Anthropic API Key:
-    - Not free for this bot. The key can be created from Anthropic Console,
-      but Claude API calls are usage-based token billing.
+src = open(bot_path).read()
+src = src.replace("YOUR_ZERODHA_API_KEY",    zerodha_key)
+src = src.replace("YOUR_ZERODHA_API_SECRET", zerodha_secret)
+src = src.replace("YOUR_ANTHROPIC_API_KEY",  anthropic_key)
+src = src.replace('"capital":           50000', f'"capital":           {capital_str}')
+open(bot_path, "w").write(src)
+print("\n  ✅ bot.py updated with your credentials.\n")
 
-  Ollama fallback:
-    - Free when run locally on your own machine.
-    - Ollama cloud has a free tier plus paid Pro/Max plans.
-
-  Python packages installed above are free/open-source packages.
-""")
-
-print("Step 3: Enter credentials for local .env\n")
-zerodha_key = input("  Zerodha Kite API Key    : ").strip()
-zerodha_secret = input("  Zerodha Kite API Secret : ").strip()
-anthropic_key = input("  Anthropic API Key       : ").strip()
-capital = input("  Capital per day INR (default 50000): ").strip() or "50000"
-
-save_env({
-    "KITE_API_KEY": zerodha_key,
-    "KITE_API_SECRET": zerodha_secret,
-    "ANTHROPIC_API_KEY": anthropic_key,
-    "TRADE_CAPITAL": capital,
-})
-
-print("\n  Saved credentials to local .env. This file is ignored by Git.\n")
-
-print("Step 4: Local LLM fallback")
-want_ollama = input("  Install Ollama for local fallback? [y/N]: ").strip().lower()
-if want_ollama == "y":
+# ── Step 4: Optional Ollama ──────────────────────────
+print("Step 3 — Local LLM fallback (Ollama/Mistral) for internet outages")
+want = input("  Set up Ollama? [y/N]: ").strip().lower()
+if want == "y":
     print("""
-  Download and install Ollama from: https://ollama.com/download
-  Then run:  ollama pull mistral
+  1. Download Ollama from: https://ollama.com/download
+  2. Run: ollama pull mistral
+  The bot will auto-switch to Mistral if internet drops,
+  and switch back to Claude when it returns.
 """)
 else:
-    print("  Skipped. Bot will use Claude API only.\n")
+    print("  Skipped — bot will use Claude only.\n")
 
+# ── Step 5: Paper trade reminder ─────────────────────
 print("""
-╔══════════════════════════════════════════════════╗
-║  Setup complete.                                ║
-║                                                  ║
-║  Web terminal:                                   ║
-║    python web_dashboard.py                       ║
-║                                                  ║
-║  Main bot:                                       ║
-║    python bot.py                                 ║
-║                                                  ║
-║  Terminal dashboard:                             ║
-║    python dashboard.py                           ║
-╚══════════════════════════════════════════════════╝
+  ⚠  PAPER_TRADE = True is set in bot.py by default.
+     No real orders will be placed until you change that line to False.
+     Always run paper mode for at least 1 week before going live.
+""")
+
+# ── Done ─────────────────────────────────────────────
+print("""
+╔══════════════════════════════════════════════════════╗
+║  Setup complete!  Quick reference:                   ║
+║                                                      ║
+║  Backtest first (paper, no real data needed):        ║
+║    python backtest.py --index "NIFTY 50" --days 30   ║
+║                                                      ║
+║  Run the bot (PAPER_TRADE=True by default):          ║
+║    python bot.py                                     ║
+║                                                      ║
+║  Browser dashboard:                                  ║
+║    python web_dashboard.py                           ║
+║                                                      ║
+║  View today's trades:                                ║
+║    python journal.py                                 ║
+║                                                      ║
+║  All-time P&L:                                       ║
+║    python journal.py --all                           ║
+╚══════════════════════════════════════════════════════╝
 """)
