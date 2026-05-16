@@ -198,6 +198,11 @@
               <option value="{{ item.tv }}">{{ item.label }}</option>
               {% endfor %}
             </select>
+            <select id="interval-select" aria-label="Interval">
+              <option value="D">1D</option>
+              <option value="W">1W</option>
+              <option value="M">1M</option>
+            </select>
             <button class="icon-button" id="refresh-chart" title="Refresh chart">R</button>
           </div>
         </div>
@@ -280,6 +285,7 @@
 const fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const intFmt = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
 let activeSymbol = document.getElementById('symbol-select').value;
+let activeInterval = document.getElementById('interval-select').value;
 
 function money(value) {
   const number = Number(value || 0);
@@ -300,8 +306,9 @@ function clearNode(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-function loadTradingView(symbol) {
+function loadTradingView(symbol, interval = activeInterval) {
   activeSymbol = symbol;
+  activeInterval = interval;
   const root = document.getElementById('tv-chart');
   clearNode(root);
 
@@ -323,7 +330,7 @@ function loadTradingView(symbol) {
   script.text = JSON.stringify({
     autosize: true,
     symbol,
-    interval: '5',
+    interval,
     timezone: 'Asia/Kolkata',
     theme: 'dark',
     style: '1',
@@ -447,7 +454,8 @@ async function refresh() {
 }
 
 document.getElementById('symbol-select').addEventListener('change', event => loadTradingView(event.target.value));
-document.getElementById('refresh-chart').addEventListener('click', () => loadTradingView(activeSymbol));
+document.getElementById('interval-select').addEventListener('change', event => loadTradingView(activeSymbol, event.target.value));
+document.getElementById('refresh-chart').addEventListener('click', () => loadTradingView(activeSymbol, activeInterval));
 
 loadTradingView(activeSymbol);
 refresh();
