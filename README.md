@@ -43,8 +43,10 @@ python backtest.py --symbol RELIANCE --days 30
 
 Open the browser monitor at `http://127.0.0.1:5050`. It reads local
 `trades.db` and `bot.log` at runtime and embeds TradingView charts for the
-configured watchlist. Runtime databases, logs, CSV exports, and generated
-reports are ignored by Git.
+configured watchlist. The chart watchlist uses BSE equity symbols because
+TradingView's free embedded widget can restrict NSE index symbols such as
+NIFTY/BANKNIFTY. Runtime databases, logs, CSV exports, and generated reports
+are ignored by Git.
 
 ---
 

@@ -33,14 +33,14 @@ LOG_FILE = PROJECT_ROOT / "bot.log"
 BOT_FILE = PROJECT_ROOT / "bot.py"
 
 WATCHLIST = [
-    {"label": "NIFTY 50", "tv": "NSE:NIFTY"},
-    {"label": "NIFTY BANK", "tv": "NSE:BANKNIFTY"},
-    {"label": "RELIANCE", "tv": "NSE:RELIANCE"},
-    {"label": "TCS", "tv": "NSE:TCS"},
-    {"label": "HDFCBANK", "tv": "NSE:HDFCBANK"},
-    {"label": "INFY", "tv": "NSE:INFY"},
-    {"label": "ICICIBANK", "tv": "NSE:ICICIBANK"},
-    {"label": "SBIN", "tv": "NSE:SBIN"},
+    {"label": "RELIANCE", "tv": "BSE:RELIANCE"},
+    {"label": "TCS", "tv": "BSE:TCS"},
+    {"label": "HDFCBANK", "tv": "BSE:HDFCBANK"},
+    {"label": "INFY", "tv": "BSE:INFY"},
+    {"label": "ICICIBANK", "tv": "BSE:ICICIBANK"},
+    {"label": "SBIN", "tv": "BSE:SBIN"},
+    {"label": "ITC", "tv": "BSE:ITC"},
+    {"label": "LT", "tv": "BSE:LT"},
 ]
 
 app = Flask(__name__)
