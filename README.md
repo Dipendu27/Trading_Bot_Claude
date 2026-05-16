@@ -185,7 +185,9 @@ Mistral handles about 80% of Claude's quality for this use case.
 - Paper trade for at least 1 week before deploying real capital.
 - Works best in trending markets; may underperform in choppy/sideways conditions.
 - Requires Zerodha MIS (intraday) trading to be enabled on your account.
-- Kite API requires a ₹2,000/month subscription from Zerodha.
+- Kite's personal API tier is free for basic account/order APIs, but this bot
+  needs historical candles and live WebSocket ticks, which require Kite Connect.
+  Zerodha currently lists Kite Connect at ₹500/month.
 - Get your Anthropic API key at: https://console.anthropic.com
 
 ---
