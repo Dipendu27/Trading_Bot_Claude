@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{% block title %}{{ title }}{% endblock %}</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:ital,wght@0,400;0,700;1,400&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,600&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:       #0a0c0f;
+  --bg2:      #111318;
+  --bg3:      #181c24;
+  --border:   #1e2530;
+  --border2:  #2a3040;
+  --text:     #e8eaf0;
+  --text2:    #8892a4;
+  --text3:    #4a5568;
+  --accent:   #00d4aa;
+  --accent2:  #0099ff;
+  --buy:      #00c896;
+  --sell:     #ff4d6a;
+  --warn:     #f5a623;
+  --hold:     #8892a4;
+  --font-mono: 'Space Mono', monospace;
+  --font-sans: 'DM Sans', sans-serif;
+  --radius:   6px;
+  --shadow:   0 4px 24px rgba(0,0,0,0.4);
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: var(--font-sans); font-size: 14px; line-height: 1.6; min-height: 100vh; }
+
+.navbar { background: var(--bg2); border-bottom: 1px solid var(--border); padding: 0 24px; height: 52px; display: flex; align-items: center; justify-content: space-between; position: sticky; top: 0; z-index: 100; }
+.navbar-brand { font-family: var(--font-mono); font-size: 17px; font-weight: 700; color: var(--accent); text-decoration: none; display: flex; align-items: center; gap: 8px; }
+.navbar-domain { font-family: var(--font-mono); font-size: 10px; color: var(--text3); margin-left: 2px; }
+.navbar-nav { display: flex; align-items: center; gap: 2px; list-style: none; }
+.navbar-nav a { color: var(--text2); text-decoration: none; padding: 6px 12px; border-radius: var(--radius); font-size: 13px; font-weight: 500; transition: all 0.15s; }
+.navbar-nav a:hover, .navbar-nav a.active { color: var(--text); background: var(--bg3); }
+.navbar-user { display: flex; align-items: center; gap: 10px; }
+.avatar { width: 30px; height: 30px; background: linear-gradient(135deg, var(--accent), var(--accent2)); border-radius: 50%; display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: #000; }
+
+.ticker-tape { background: var(--bg3); border-bottom: 1px solid var(--border); overflow: hidden; height: 28px; display: flex; align-items: center; }
+.ticker-inner { display: flex; gap: 28px; animation: scroll-left 50s linear infinite; white-space: nowrap; padding: 0 16px; }
+@keyframes scroll-left { 0% { transform: translateX(0); } 100% { transform: translateX(-50%); } }
+.ticker-item { display: flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 10px; }
+.ticker-sym { color: var(--text3); font-weight: 700; }
+
+.page { padding: 20px 24px; max-width: 1600px; margin: 0 auto; }
+.page-header { margin-bottom: 20px; }
+.page-header h1 { font-family: var(--font-mono); font-size: 18px; font-weight: 700; }
+.page-header p { color: var(--text2); font-size: 12px; margin-top: 3px; }
+
+.card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); overflow: hidden; }
+.card-header { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; }
+.card-title { font-family: var(--font-mono); font-size: 11px; font-weight: 700; color: var(--text2); text-transform: uppercase; letter-spacing: 0.08em; }
+.card-body { padding: 16px; }
+
+.grid { display: grid; gap: 14px; }
+.grid-4 { grid-template-columns: repeat(4, 1fr); }
+.grid-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-main { grid-template-columns: 1fr 340px; }
+
+.stat-card { background: var(--bg2); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; }
+.stat-label { font-family: var(--font-mono); font-size: 10px; color: var(--text3); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 6px; }
+.stat-value { font-family: var(--font-mono); font-size: 20px; font-weight: 700; }
+.stat-sub { font-size: 12px; color: var(--text2); margin-top: 3px; }
+
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; }
+th { font-family: var(--font-mono); font-size: 10px; font-weight: 700; color: var(--text3); text-transform: uppercase; letter-spacing: 0.08em; padding: 9px 12px; text-align: left; border-bottom: 1px solid var(--border); white-space: nowrap; }
+td { padding: 9px 12px; border-bottom: 1px solid var(--border); font-size: 13px; white-space: nowrap; }
+tr:last-child td { border-bottom: none; }
+tr:hover td { background: var(--bg3); }
+.mono { font-family: var(--font-mono); }
+
+.badge { display: inline-block; padding: 2px 7px; border-radius: 3px; font-family: var(--font-mono); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
+.badge-buy    { background: rgba(0,200,150,0.15); color: var(--buy); border: 1px solid rgba(0,200,150,0.25); }
+.badge-sell   { background: rgba(255,77,106,0.15); color: var(--sell); border: 1px solid rgba(255,77,106,0.25); }
+.badge-hold   { background: rgba(136,146,164,0.12); color: var(--hold); border: 1px solid rgba(136,146,164,0.2); }
+.badge-high   { background: rgba(0,212,170,0.18); color: var(--accent); }
+.badge-medium { background: rgba(245,166,35,0.18); color: var(--warn); }
+.badge-low    { background: rgba(136,146,164,0.12); color: var(--text3); }
+
+.btn { display: inline-flex; align-items: center; gap: 5px; padding: 7px 14px; border-radius: var(--radius); font-family: var(--font-sans); font-size: 13px; font-weight: 600; cursor: pointer; border: none; text-decoration: none; transition: all 0.15s; }
+.btn-buy  { background: var(--buy); color: #000; }
+.btn-buy:hover  { background: #00e6ac; transform: translateY(-1px); }
+.btn-sell { background: var(--sell); color: #fff; }
+.btn-sell:hover { background: #ff6680; transform: translateY(-1px); }
+.btn-ghost { background: transparent; color: var(--text2); border: 1px solid var(--border2); }
+.btn-ghost:hover { border-color: var(--accent); color: var(--accent); }
+.btn-accent { background: var(--accent); color: #000; }
+.btn-accent:hover { background: #00ebb9; }
+.btn-sm { padding: 4px 10px; font-size: 12px; }
+
+.pos { color: var(--buy); } .neg { color: var(--sell); } .neu { color: var(--text2); }
+
+.score-bar { display: flex; align-items: center; gap: 5px; font-family: var(--font-mono); font-size: 10px; color: var(--text3); }
+.score-track { flex: 1; height: 3px; background: var(--border2); border-radius: 2px; overflow: hidden; min-width: 40px; }
+.score-fill { height: 100%; border-radius: 2px; transition: width 0.4s; }
+.score-fill-buy  { background: var(--buy); }
+.score-fill-sell { background: var(--sell); }
+
+.flash { padding: 9px 16px; border-radius: var(--radius); margin-bottom: 14px; font-size: 13px; }
+.flash-error   { background: rgba(255,77,106,0.12); border: 1px solid var(--sell); color: var(--sell); }
+.flash-success { background: rgba(0,200,150,0.12); border: 1px solid var(--buy); color: var(--buy); }
+
+#toast { position: fixed; bottom: 20px; right: 20px; background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius); padding: 10px 16px; font-size: 13px; color: var(--text); box-shadow: var(--shadow); z-index: 9999; opacity: 0; transform: translateY(8px); transition: all 0.25s; max-width: 300px; pointer-events: none; }
+#toast.show { opacity: 1; transform: translateY(0); }
+#toast.toast-success { border-color: var(--buy); }
+#toast.toast-error   { border-color: var(--sell); }
+
+.live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--buy); display: inline-block; animation: pulse 2s infinite; }
+@keyframes pulse { 0%,100% { opacity:1; } 50% { opacity:0.3; } }
+
+::-webkit-scrollbar { width: 5px; height: 5px; }
+::-webkit-scrollbar-track { background: var(--bg); }
+::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+/* Modal */
+.modal-bg { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:200; align-items:center; justify-content:center; }
+.modal-bg.open { display:flex; }
+.modal { background: var(--bg2); border: 1px solid var(--border2); border-radius: 8px; padding: 24px; min-width: 320px; max-width: 420px; width: 90%; }
+.modal h3 { font-family: var(--font-mono); font-size: 15px; margin-bottom: 16px; color: var(--accent); }
+.form-group { margin-bottom: 14px; }
+.form-group label { display: block; font-size: 12px; color: var(--text2); margin-bottom: 5px; font-weight: 500; }
+.form-control { width: 100%; background: var(--bg3); border: 1px solid var(--border2); border-radius: var(--radius); padding: 8px 12px; color: var(--text); font-family: var(--font-sans); font-size: 13px; outline: none; transition: border 0.15s; }
+.form-control:focus { border-color: var(--accent); }
+.modal-footer { display: flex; gap: 8px; justify-content: flex-end; margin-top: 18px; }
+</style>
+{% block extra_head %}{% endblock %}
+</head>
+<body>
+
+<div class="ticker-tape">
+  <div class="ticker-inner" id="ticker-inner">
+    {% set syms = ['RELIANCE','TCS','HDFCBANK','INFY','ICICIBANK','SBIN','BHARTIARTL','ITC','KOTAKBANK','LT','AXISBANK','MARUTI','TITAN','SUNPHARMA','BAJFINANCE','WIPRO','HCLTECH','ULTRACEMCO','NESTLEIND','ASIANPAINT'] %}
+    {% for sym in syms + syms %}
+    <span class="ticker-item">
+      <span class="ticker-sym">{{ sym }}</span>
+      <span id="tick-{{ loop.index }}">—</span>
+    </span>
+    {% endfor %}
+  </div>
+</div>
+
+<nav class="navbar">
+  <a href="/dashboard" class="navbar-brand">
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+      <rect width="16" height="16" rx="3" fill="#00d4aa" opacity="0.2"/>
+      <path d="M2 12L6 7L9 10L14 4" stroke="#00d4aa" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+    </svg>
+    {{ title }}<span style="color:var(--accent2)">.</span>
+    <span class="navbar-domain">{{ domain }}</span>
+  </a>
+  {% if session.user_id %}
+  <ul class="navbar-nav">
+    <li><a href="/dashboard" {% if request.endpoint=='dashboard' %}class="active"{% endif %}>Overview</a></li>
+    <li><a href="/dashboard#signals" {% if request.endpoint=='signals' %}class="active"{% endif %}>Signals</a></li>
+    <li><a href="/dashboard#trades">History</a></li>
+  </ul>
+  <div class="navbar-user">
+    <span class="live-dot"></span>
+    <span style="color:var(--text3);font-size:11px;font-family:var(--font-mono)">PAPER</span>
+    <div class="avatar">{{ session.username[0].upper() }}</div>
+    <span style="color:var(--text2);font-size:13px">{{ session.username }}</span>
+    <a href="/logout" class="btn btn-ghost btn-sm">Exit</a>
+  </div>
+  {% endif %}
+</nav>
+
+{% with msgs = get_flashed_messages(with_categories=true) %}
+{% if msgs %}
+<div style="padding:10px 24px 0">
+{% for cat, msg in msgs %}
+<div class="flash flash-{{ cat }}">{{ msg }}</div>
+{% endfor %}
+</div>
+{% endif %}
+{% endwith %}
+
+{% block content %}{% endblock %}
+<div id="toast"></div>
+
+<script>
+const SYMS = ['RELIANCE','TCS','HDFCBANK','INFY','ICICIBANK','SBIN','BHARTIARTL','ITC','KOTAKBANK','LT','AXISBANK','MARUTI','TITAN','SUNPHARMA','BAJFINANCE','WIPRO','HCLTECH','ULTRACEMCO','NESTLEIND','ASIANPAINT'];
+
+function showToast(msg, type='success') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = `show toast-${type}`;
+  clearTimeout(t._tid);
+  t._tid = setTimeout(() => t.className = '', 3500);
+}
+
+{% if session.user_id %}
+async function updateTicker() {
+  try {
+    const r = await fetch('/api/signals');
+    const d = await r.json();
+    let idx = 1;
+    for (const sym of [...SYMS, ...SYMS]) {
+      const sig = d[sym];
+      if (!sig) { idx++; continue; }
+      const col = sig.change_pct >= 0 ? '#00c896' : '#ff4d6a';
+      const arr = sig.change_pct >= 0 ? '▲' : '▼';
+      const el  = document.getElementById('tick-' + idx);
+      if (el) el.innerHTML = `<span style="color:var(--text)">₹${sig.price.toFixed(2)}</span> <span style="color:${col}">${arr}${Math.abs(sig.change_pct).toFixed(2)}%</span>`;
+      idx++;
+    }
+  } catch(e) {}
+}
+updateTicker();
+setInterval(updateTicker, 15000);
+{% endif %}
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

@@ -1,0 +1,38 @@
+# Local environment
+.venv/
+venv/
+env/
+.env
+.env.*
+
+# Python cache/build output
+__pycache__/
+*.py[cod]
+*.pyo
+*.egg-info/
+build/
+dist/
+
+# Local OS/editor files
+.DS_Store
+.idea/
+.vscode/
+
+# Runtime credentials and logs
+.access_token
+*.log
+
+# Local databases/runtime state
+*.db
+*.sqlite
+*.sqlite3
+
+# Generated reports and local result snapshots
+00_START_HERE.txt
+ANALYSIS_REPORT.txt
+LIVE_TRADING_RESULTS.txt
+QUICK_SUMMARY.txt
+TRADE_PERFORMANCE_CHART.html
+backtest_*.csv
+backtest_all.csv
+trades.csv
