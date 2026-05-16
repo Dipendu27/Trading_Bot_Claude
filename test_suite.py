@@ -339,6 +339,7 @@ def test_web_dashboard():
         candles = client.get("/api/candles?symbol=RELIANCE&interval=5m")
         quotes = client.get("/api/quotes")
         broker = client.get("/api/broker")
+        kite_status = client.get("/api/kite/status")
 
         if page.status_code != 200:
             print_error(f"Dashboard page failed: HTTP {page.status_code}")
@@ -354,14 +355,17 @@ def test_web_dashboard():
             if candle_data.get("source") != "kite" or not candle_data.get("candles"):
                 print_error("Candle API did not return Kite candles")
                 return False
-        elif candles.status_code != 503 or candle_data.get("candles"):
+        elif candles.status_code not in (502, 503) or candle_data.get("candles"):
             print_error("Candle API should not serve fallback market data")
             return False
-        if quotes.status_code not in (200, 503):
+        if quotes.status_code not in (200, 502, 503):
             print_error("Quote API failed")
             return False
-        if broker.status_code not in (200, 503):
+        if broker.status_code not in (200, 502, 503):
             print_error("Broker API failed")
+            return False
+        if kite_status.status_code != 200 or "connected" not in kite_status.get_json():
+            print_error("Kite status API failed")
             return False
 
         print_success("Dashboard page renders")
@@ -370,6 +374,7 @@ def test_web_dashboard():
         print_success("Candle API uses Kite only")
         print_success("Quote API responds")
         print_success("Broker API responds")
+        print_success("Kite status API responds")
         return True
     except Exception as e:
         print_error(f"Web dashboard smoke test failed: {e}")

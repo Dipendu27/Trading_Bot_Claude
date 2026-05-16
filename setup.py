@@ -1,73 +1,92 @@
 #!/usr/bin/env python3
 """
-setup.py — First-time setup wizard for the Zerodha AI Bot
-Run once:  python setup.py
+setup.py - First-time setup wizard for the Zerodha AI Bot.
+
+Run once:
+    python setup.py
 """
 
-import os, subprocess, sys
+from __future__ import annotations
+
+import subprocess
+import sys
+from pathlib import Path
+
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+ENV_FILE = PROJECT_ROOT / ".env"
+
+
+def save_env(values: dict[str, str]) -> None:
+    existing: dict[str, str] = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            if "=" not in line or line.strip().startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            existing[key.strip()] = value.strip().strip('"').strip("'")
+
+    for key, value in values.items():
+        if value:
+            existing[key] = value.strip()
+
+    ordered = [
+        "KITE_API_KEY",
+        "KITE_API_SECRET",
+        "ANTHROPIC_API_KEY",
+        "TRADE_CAPITAL",
+    ]
+    keys = ordered + sorted(key for key in existing if key not in ordered)
+    ENV_FILE.write_text("\n".join(f"{key}={existing[key]}" for key in keys if existing.get(key)) + "\n")
+
 
 print("""
 ╔══════════════════════════════════════════════════╗
-║   Zerodha AI Bot — First-time Setup Wizard       ║
+║   Zerodha AI Bot - First-time Setup Wizard       ║
 ╚══════════════════════════════════════════════════╝
 """)
 
-# ── 1. Install dependencies ───────────────────────
-print("Step 1: Installing Python packages…")
-pkgs = ["kiteconnect", "anthropic", "pandas", "numpy", "schedule", "requests", "rich"]
+print("Step 1: Installing Python packages...")
+pkgs = ["kiteconnect", "anthropic", "pandas", "numpy", "schedule", "requests", "rich", "flask"]
 subprocess.check_call([sys.executable, "-m", "pip", "install", "--quiet"] + pkgs)
-print("  ✅ Packages installed.\n")
+print("  Packages installed.\n")
 
-# ── 2. Collect credentials ────────────────────────
-print("Step 2: Enter your credentials (stored only in bot.py locally)\n")
+print("Step 2: Enter credentials for local .env\n")
+zerodha_key = input("  Zerodha Kite API Key    : ").strip()
+zerodha_secret = input("  Zerodha Kite API Secret : ").strip()
+anthropic_key = input("  Anthropic API Key       : ").strip()
+capital = input("  Capital per day INR (default 50000): ").strip() or "50000"
 
-zerodha_key    = input("  Zerodha API Key    : ").strip()
-zerodha_secret = input("  Zerodha API Secret : ").strip()
-anthropic_key  = input("  Anthropic API Key  : ").strip()
-capital        = input("  Capital per day ₹  (default 25000): ").strip() or "25000"
+save_env({
+    "KITE_API_KEY": zerodha_key,
+    "KITE_API_SECRET": zerodha_secret,
+    "ANTHROPIC_API_KEY": anthropic_key,
+    "TRADE_CAPITAL": capital,
+})
 
-# ── 3. Patch bot.py ───────────────────────────────
-bot_path = os.path.join(os.path.dirname(__file__), "bot.py")
-with open(bot_path) as f:
-    src = f.read()
+print("\n  Saved credentials to local .env. This file is ignored by Git.\n")
 
-src = src.replace("YOUR_ZERODHA_API_KEY",    zerodha_key)
-src = src.replace("YOUR_ZERODHA_API_SECRET", zerodha_secret)
-src = src.replace("YOUR_ANTHROPIC_API_KEY",  anthropic_key)
-src = src.replace('"capital":           25000', f'"capital":           {capital}')
-
-with open(bot_path, "w") as f:
-    f.write(src)
-
-print("\n  ✅ bot.py configured.\n")
-
-# ── 4. Optional Ollama ────────────────────────────
-print("Step 3: Local LLM fallback (for internet outages)")
+print("Step 3: Local LLM fallback")
 want_ollama = input("  Install Ollama for local fallback? [y/N]: ").strip().lower()
 if want_ollama == "y":
     print("""
-  ➡  Download and install Ollama from: https://ollama.com/download
-  ➡  Then run:  ollama pull mistral
-  ➡  The bot will auto-switch to Mistral when your internet drops.
+  Download and install Ollama from: https://ollama.com/download
+  Then run:  ollama pull mistral
 """)
 else:
-    print("  Skipped. Bot will use Claude API only (may pause on internet drops).\n")
+    print("  Skipped. Bot will use Claude API only.\n")
 
-# ── 5. Done ───────────────────────────────────────
 print("""
 ╔══════════════════════════════════════════════════╗
-║  Setup complete!  Here's how to run the bot:     ║
+║  Setup complete.                                ║
 ║                                                  ║
-║  Every morning before 9:15 AM:                   ║
+║  Web terminal:                                   ║
+║    python web_dashboard.py                       ║
+║                                                  ║
+║  Main bot:                                       ║
 ║    python bot.py                                 ║
 ║                                                  ║
-║  In a second terminal (optional live view):      ║
+║  Terminal dashboard:                             ║
 ║    python dashboard.py                           ║
-║                                                  ║
-║  Backtest a symbol first (recommended):          ║
-║    python backtest.py --symbol RELIANCE --days 30║
-║                                                  ║
-║  View today's trade journal:                     ║
-║    python journal.py                             ║
 ╚══════════════════════════════════════════════════╝
 """)

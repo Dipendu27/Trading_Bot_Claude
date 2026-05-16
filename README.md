@@ -47,10 +47,14 @@ TradingView Lightweight Charts, and loads live watchlist quotes, market depth,
 positions, orders, and equity margins from Zerodha Kite. It does not generate
 fallback prices. If Kite credentials or today's `.access_token` are missing,
 market panels show a Kite connection error instead of prices. The dashboard can
-read credentials from `bot.py` or from `KITE_API_KEY` / `ZERODHA_API_KEY`, and
-can read an access token from `.access_token`, `KITE_ACCESS_TOKEN`, or
-`ZERODHA_ACCESS_TOKEN`. Runtime databases, logs, access tokens, CSV exports,
-and generated reports are ignored by Git.
+read credentials from local `.env`, `bot.py`, or `KITE_API_KEY` /
+`ZERODHA_API_KEY`, and can read an access token from `.access_token`,
+`KITE_ACCESS_TOKEN`, or `ZERODHA_ACCESS_TOKEN`.
+
+The web terminal also has a Kite Connection panel. Save your API key and secret
+there, open the Kite login URL, paste the `request_token`, and the dashboard
+will save today's access token locally. Runtime databases, `.env`, access
+tokens, logs, CSV exports, and generated reports are ignored by Git.
 
 ---
 

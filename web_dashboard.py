@@ -31,6 +31,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 DB_FILE = PROJECT_ROOT / "trades.db"
 LOG_FILE = PROJECT_ROOT / "bot.log"
 BOT_FILE = PROJECT_ROOT / "bot.py"
+ENV_FILE = PROJECT_ROOT / ".env"
 ACCESS_TOKEN_FILE = PROJECT_ROOT / ".access_token"
 ENV_KEYS = {
     "api_key": ("KITE_API_KEY", "ZERODHA_API_KEY"),
@@ -67,6 +68,46 @@ INTERVALS = {
 
 class MarketDataError(RuntimeError):
     """Raised when live broker market data cannot be loaded."""
+
+
+def _load_env_file() -> None:
+    if not ENV_FILE.exists():
+        return
+    for line in ENV_FILE.read_text().splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        value = value.strip().strip('"').strip("'")
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
+_load_env_file()
+
+
+def _write_env_values(values: dict[str, str]) -> None:
+    existing: dict[str, str] = {}
+    if ENV_FILE.exists():
+        for line in ENV_FILE.read_text().splitlines():
+            if "=" not in line or line.strip().startswith("#"):
+                continue
+            key, value = line.split("=", 1)
+            existing[key.strip()] = value.strip().strip('"').strip("'")
+    for key, value in values.items():
+        if value:
+            existing[key] = value.strip()
+            os.environ[key] = value.strip()
+    ordered_keys = [
+        "KITE_API_KEY",
+        "KITE_API_SECRET",
+        "ANTHROPIC_API_KEY",
+        "KITE_ACCESS_TOKEN",
+    ]
+    keys = ordered_keys + sorted(key for key in existing if key not in ordered_keys)
+    lines = [f"{key}={existing[key]}" for key in keys if existing.get(key)]
+    ENV_FILE.write_text("\n".join(lines) + ("\n" if lines else ""))
 
 
 def _connect() -> sqlite3.Connection | None:
@@ -138,19 +179,26 @@ def _saved_access_token() -> str | None:
 
 def _kite_status() -> dict[str, Any]:
     api_key = _bot_cfg_value("api_key")
+    api_secret = _bot_cfg_value("api_secret")
     has_key = bool(api_key and not api_key.startswith("YOUR_"))
+    has_secret = bool(api_secret and not api_secret.startswith("YOUR_"))
     token = _saved_access_token()
     if not has_key:
-        reason = "Zerodha api_key is not configured in bot.py"
+        reason = "Zerodha Kite API key is not configured"
     elif not token:
         reason = f"No Zerodha access token for {_today_ist().isoformat()}"
+    elif not has_secret:
+        reason = "Kite token available. API secret is only needed to renew login."
     else:
         reason = "Kite token available"
     return {
         "configured": has_key,
+        "secret": has_secret,
         "token": token is not None,
         "connected": has_key and token is not None,
         "reason": reason,
+        "env_file": ENV_FILE.exists(),
+        "token_file": ACCESS_TOKEN_FILE.exists(),
     }
 
 
@@ -158,7 +206,7 @@ def _kite_client():
     api_key = _bot_cfg_value("api_key")
     access_token = _saved_access_token()
     if not api_key or api_key.startswith("YOUR_"):
-        raise MarketDataError("Zerodha api_key is not configured in bot.py")
+        raise MarketDataError("Zerodha Kite API key is not configured")
     if not access_token:
         raise MarketDataError(
             f"No Zerodha access token for {_today_ist().isoformat()}. Run python bot.py and complete Kite login."
@@ -639,6 +687,70 @@ def api_health():
             "market": _market_status(),
         }
     )
+
+
+@app.route("/api/kite/status")
+def api_kite_status():
+    return jsonify(_kite_status())
+
+
+@app.route("/api/kite/config", methods=["POST"])
+def api_kite_config():
+    payload = request.get_json(silent=True) or {}
+    api_key = str(payload.get("api_key") or "").strip()
+    api_secret = str(payload.get("api_secret") or "").strip()
+    if not api_key or not api_secret:
+        return jsonify({"error": "Both Kite API key and API secret are required"}), 400
+    _write_env_values({
+        "KITE_API_KEY": api_key,
+        "KITE_API_SECRET": api_secret,
+    })
+    return jsonify({
+        "ok": True,
+        "message": "Kite credentials saved to local .env",
+        "kite": _kite_status(),
+    })
+
+
+@app.route("/api/kite/login-url")
+def api_kite_login_url():
+    api_key = _bot_cfg_value("api_key")
+    if not api_key or api_key.startswith("YOUR_"):
+        return jsonify({"error": "Set Kite API key first"}), 400
+    from kiteconnect import KiteConnect
+
+    kite = KiteConnect(api_key=api_key)
+    return jsonify({"login_url": kite.login_url(), "kite": _kite_status()})
+
+
+@app.route("/api/kite/session", methods=["POST"])
+def api_kite_session():
+    payload = request.get_json(silent=True) or {}
+    request_token = str(payload.get("request_token") or "").strip()
+    api_key = _bot_cfg_value("api_key")
+    api_secret = _bot_cfg_value("api_secret")
+    if not request_token:
+        return jsonify({"error": "request_token is required"}), 400
+    if not api_key or api_key.startswith("YOUR_") or not api_secret or api_secret.startswith("YOUR_"):
+        return jsonify({"error": "Kite API key and secret are required"}), 400
+
+    from kiteconnect import KiteConnect
+
+    try:
+        kite = KiteConnect(api_key=api_key)
+        sess = kite.generate_session(request_token, api_secret=api_secret)
+    except Exception as exc:
+        return jsonify({"error": f"Kite login failed: {exc}"}), 502
+
+    access_token = sess["access_token"]
+    today = _today_ist().isoformat()
+    ACCESS_TOKEN_FILE.write_text(f"{today}|{access_token}")
+    os.environ["KITE_ACCESS_TOKEN"] = access_token
+    return jsonify({
+        "ok": True,
+        "message": f"Kite access token saved for {today}",
+        "kite": _kite_status(),
+    })
 
 
 def main() -> None:

@@ -166,6 +166,54 @@
       font-size: 12px;
       line-height: 1.6;
     }
+    .connect-panel {
+      position: absolute;
+      inset: 0;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      padding: 22px;
+      background: rgba(8,11,15,.9);
+    }
+    .connect-card {
+      width: min(760px, 100%);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: 0 18px 48px rgba(0,0,0,.34);
+    }
+    .connect-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+    }
+    .connect-head h3 { margin: 0; font-size: 13px; text-transform: uppercase; color: var(--muted); }
+    .connect-body { display: grid; gap: 12px; padding: 14px; }
+    .connect-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .connect-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+    .connect-actions .text-button { min-width: 128px; }
+    .connect-status {
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: var(--panel-3);
+      color: var(--warn);
+      font-family: var(--font-mono);
+      font-size: 12px;
+      line-height: 1.45;
+    }
     .chart-status {
       min-width: 190px;
       color: var(--muted);
@@ -332,7 +380,7 @@
       .chart-status { min-width: 100%; text-align: left; }
     }
     @media (max-width: 520px) {
-      .metrics, .ticket-grid, .estimate, .depth-grid { grid-template-columns: 1fr; }
+      .metrics, .ticket-grid, .estimate, .depth-grid, .connect-grid { grid-template-columns: 1fr; }
       .bar-row { grid-template-columns: 82px 40px minmax(70px, 1fr) 70px; }
     }
   </style>
@@ -386,6 +434,41 @@
         <div class="chart-wrap">
           <div id="market-chart"></div>
           <div class="chart-empty" id="chart-empty"></div>
+          <div class="connect-panel" id="connect-panel">
+            <div class="connect-card">
+              <div class="connect-head">
+                <h3>Kite Connection</h3>
+                <span class="pill bad" id="connect-pill">OFFLINE</span>
+              </div>
+              <div class="connect-body">
+                <div class="connect-status" id="connect-status">Checking Kite status.</div>
+                <div class="connect-grid">
+                  <div class="field">
+                    <label>API Key</label>
+                    <input id="kite-api-key" autocomplete="off">
+                  </div>
+                  <div class="field">
+                    <label>API Secret</label>
+                    <input id="kite-api-secret" type="password" autocomplete="off">
+                  </div>
+                </div>
+                <div class="connect-actions">
+                  <button class="text-button" id="save-kite-config">Save Credentials</button>
+                  <button class="text-button" id="open-kite-login">Open Kite Login</button>
+                </div>
+                <div class="connect-grid">
+                  <div class="field">
+                    <label>Request Token</label>
+                    <input id="kite-request-token" autocomplete="off">
+                  </div>
+                  <div class="field">
+                    <label>Session</label>
+                    <button class="text-button" id="save-kite-token" style="width:100%;height:32px">Save Access Token</button>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -672,6 +755,83 @@ function setChartEmpty(message) {
   overlay.textContent = message || '';
 }
 
+function setConnectPanel(show, message = '', state = 'bad') {
+  const panel = document.getElementById('connect-panel');
+  const status = document.getElementById('connect-status');
+  const pill = document.getElementById('connect-pill');
+  panel.style.display = show ? 'flex' : 'none';
+  if (message) status.textContent = message;
+  pill.textContent = show ? 'OFFLINE' : 'CONNECTED';
+  pill.className = `pill ${state}`;
+}
+
+async function refreshKiteStatus() {
+  try {
+    const res = await fetch('/api/kite/status', { cache: 'no-store' });
+    const data = await res.json();
+    if (data.connected) {
+      setPill('kite-pill', 'KITE LIVE', 'good');
+      setConnectPanel(false, data.reason, 'good');
+      return true;
+    }
+    setPill('kite-pill', 'KITE OFFLINE', 'bad');
+    setConnectPanel(true, data.reason || 'Kite is not connected.', 'bad');
+    return false;
+  } catch (err) {
+    setPill('kite-pill', 'KITE OFFLINE', 'bad');
+    setConnectPanel(true, String(err.message || err), 'bad');
+    return false;
+  }
+}
+
+async function saveKiteConfig() {
+  const apiKey = document.getElementById('kite-api-key').value.trim();
+  const apiSecret = document.getElementById('kite-api-secret').value.trim();
+  try {
+    const res = await fetch('/api/kite/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ api_key: apiKey, api_secret: apiSecret })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not save Kite credentials');
+    setConnectPanel(true, data.message || 'Kite credentials saved.', 'warn');
+    await refreshKiteStatus();
+  } catch (err) {
+    setConnectPanel(true, String(err.message || err), 'bad');
+  }
+}
+
+async function openKiteLogin() {
+  try {
+    const res = await fetch('/api/kite/login-url', { cache: 'no-store' });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not create Kite login URL');
+    window.open(data.login_url, '_blank', 'noopener,noreferrer');
+    setConnectPanel(true, 'Paste the request_token from the Kite redirect URL.', 'warn');
+  } catch (err) {
+    setConnectPanel(true, String(err.message || err), 'bad');
+  }
+}
+
+async function saveKiteToken() {
+  const requestToken = document.getElementById('kite-request-token').value.trim();
+  try {
+    const res = await fetch('/api/kite/session', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ request_token: requestToken })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Could not save Kite access token');
+    setConnectPanel(false, data.message || 'Kite connected.', 'good');
+    setPill('kite-pill', 'KITE LIVE', 'good');
+    await Promise.all([refreshQuotes(), refreshBroker(), loadMarketChart(activeSymbol, activeInterval)]);
+  } catch (err) {
+    setConnectPanel(true, String(err.message || err), 'bad');
+  }
+}
+
 async function loadMarketChart(symbol, interval = activeInterval) {
   activeSymbol = symbol;
   activeInterval = interval;
@@ -692,7 +852,8 @@ async function loadMarketChart(symbol, interval = activeInterval) {
     if (candleSeries) candleSeries.setData([]);
     status.textContent = 'Kite data unavailable';
     status.title = String(err.message || err);
-    setChartEmpty(String(err.message || err));
+    setChartEmpty('');
+    setConnectPanel(true, String(err.message || err), 'bad');
   }
 }
 
@@ -805,6 +966,7 @@ async function refreshQuotes() {
     emptyRow(document.getElementById('watchlist-body'), String(err.message || err), 4);
     renderQuoteStrip(null);
     renderDepth(null);
+    setConnectPanel(true, String(err.message || err), 'bad');
   }
 }
 
@@ -889,7 +1051,10 @@ function renderStatus(data) {
   const paper = data.bot.paper_trade === true;
   setPill('mode-pill', paper ? 'PAPER MODE' : 'LIVE MODE', paper ? 'good' : 'bad');
   setPill('db-pill', data.summary.total_trades > 0 ? 'JOURNAL READY' : 'NO JOURNAL DATA', data.summary.total_trades > 0 ? 'good' : 'warn');
-  if (data.kite && !data.kite.connected) setPill('kite-pill', 'KITE OFFLINE', 'bad');
+  if (data.kite && !data.kite.connected) {
+    setPill('kite-pill', 'KITE OFFLINE', 'bad');
+    setConnectPanel(true, data.kite.reason || 'Kite is not connected.', 'bad');
+  }
 }
 
 async function refreshOverview() {
@@ -1001,10 +1166,14 @@ document.getElementById('refresh-quotes').addEventListener('click', refreshQuote
 document.getElementById('refresh-broker').addEventListener('click', refreshBroker);
 document.getElementById('ticket-qty').addEventListener('input', updateTicketValue);
 document.getElementById('ticket-price').addEventListener('input', updateTicketValue);
+document.getElementById('save-kite-config').addEventListener('click', saveKiteConfig);
+document.getElementById('open-kite-login').addEventListener('click', openKiteLogin);
+document.getElementById('save-kite-token').addEventListener('click', saveKiteToken);
 
 if (window.lucide) window.lucide.createIcons();
 renderQuoteStrip(null);
 renderDepth(null);
+refreshKiteStatus();
 loadMarketChart(activeSymbol);
 refreshOverview();
 refreshQuotes();

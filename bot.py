@@ -125,6 +125,31 @@ CFG: Dict[str, Any] = {
     "data_quality_min_5m":  10,
 }
 
+
+def _load_local_env() -> None:
+    env_path = os.path.join(os.path.dirname(__file__), ".env")
+    if not os.path.exists(env_path):
+        return
+    with open(env_path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+def _apply_env_config() -> None:
+    _load_local_env()
+    CFG["api_key"] = os.getenv("KITE_API_KEY") or os.getenv("ZERODHA_API_KEY") or CFG["api_key"]
+    CFG["api_secret"] = os.getenv("KITE_API_SECRET") or os.getenv("ZERODHA_API_SECRET") or CFG["api_secret"]
+    CFG["anthropic_key"] = os.getenv("ANTHROPIC_API_KEY") or CFG["anthropic_key"]
+    if os.getenv("TRADE_CAPITAL"):
+        CFG["capital"] = float(os.getenv("TRADE_CAPITAL", CFG["capital"]))
+
+
+_apply_env_config()
+
 # ══════════════════════════════════════════════════════════
 #  LOGGING
 # ══════════════════════════════════════════════════════════
