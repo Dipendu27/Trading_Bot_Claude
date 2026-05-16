@@ -1,0 +1,457 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trade Claude Monitor</title>
+  <style>
+    :root {
+      --bg: #101214;
+      --panel: #171a1d;
+      --panel-2: #20252a;
+      --line: #30363d;
+      --text: #eef2f3;
+      --muted: #9ca7ae;
+      --good: #2fbf71;
+      --bad: #e05252;
+      --warn: #d8a229;
+      --accent: #4fb3d8;
+      --font-mono: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--bg);
+      color: var(--text);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+    }
+    button, select { font: inherit; }
+    .shell { min-height: 100vh; display: flex; flex-direction: column; }
+    header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--line);
+      background: #121518;
+    }
+    .brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
+    .brand h1 { margin: 0; font-size: 18px; font-weight: 720; }
+    .brand small { color: var(--muted); font-family: var(--font-mono); font-size: 11px; }
+    .status-line { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; }
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      min-height: 28px;
+      padding: 0 9px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      color: var(--muted);
+      background: var(--panel);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+    .pill.good { color: var(--good); border-color: rgba(47, 191, 113, .45); }
+    .pill.bad { color: var(--bad); border-color: rgba(224, 82, 82, .45); }
+    main {
+      display: grid;
+      grid-template-columns: minmax(0, 1.8fr) minmax(320px, .9fr);
+      gap: 14px;
+      padding: 14px;
+      flex: 1;
+    }
+    section, aside {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: 8px;
+      min-width: 0;
+    }
+    .panel-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 11px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+    .panel-head h2 { margin: 0; font-size: 13px; text-transform: uppercase; color: var(--muted); }
+    .controls { display: flex; gap: 8px; align-items: center; }
+    select, .icon-button {
+      height: 32px;
+      border: 1px solid var(--line);
+      background: var(--panel-2);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 0 9px;
+    }
+    .icon-button { width: 34px; cursor: pointer; }
+    .chart-wrap { height: 560px; min-height: 420px; }
+    #tv-chart { height: 100%; width: 100%; }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      padding: 12px;
+    }
+    .metric {
+      border: 1px solid var(--line);
+      background: #14181b;
+      border-radius: 6px;
+      padding: 11px;
+      min-height: 76px;
+    }
+    .metric label { display: block; color: var(--muted); font-size: 11px; text-transform: uppercase; }
+    .metric strong {
+      display: block;
+      margin-top: 6px;
+      font-size: 22px;
+      font-weight: 760;
+      overflow-wrap: anywhere;
+    }
+    .good-text { color: var(--good); }
+    .bad-text { color: var(--bad); }
+    .muted { color: var(--muted); }
+    .mono { font-family: var(--font-mono); }
+    .grid-lower {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      gap: 14px;
+      margin-top: 14px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    th, td {
+      padding: 8px 9px;
+      border-bottom: 1px solid rgba(255,255,255,.055);
+      text-align: right;
+      white-space: nowrap;
+    }
+    th:first-child, td:first-child { text-align: left; }
+    th { color: var(--muted); font-size: 10px; text-transform: uppercase; font-weight: 680; }
+    tr:last-child td { border-bottom: 0; }
+    .table-scroll { overflow: auto; max-height: 322px; }
+    .bars { padding: 8px 12px 12px; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 96px 48px minmax(90px, 1fr) 82px;
+      gap: 8px;
+      align-items: center;
+      padding: 7px 0;
+      font-size: 12px;
+      border-bottom: 1px solid rgba(255,255,255,.045);
+    }
+    .bar-row:last-child { border-bottom: 0; }
+    .bar-track { height: 14px; background: var(--panel-2); border-radius: 3px; overflow: hidden; }
+    .bar-fill { height: 100%; min-width: 2px; background: var(--good); }
+    .bar-fill.loss { background: var(--bad); }
+    .line-chart { padding: 12px; }
+    #equity-svg { width: 100%; height: 150px; display: block; background: #13171a; border: 1px solid var(--line); border-radius: 6px; }
+    .log {
+      height: 300px;
+      overflow: auto;
+      padding: 10px 12px;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      color: var(--muted);
+      white-space: pre-wrap;
+      line-height: 1.55;
+    }
+    @media (max-width: 980px) {
+      main { grid-template-columns: 1fr; }
+      .grid-lower { grid-template-columns: 1fr; }
+      .chart-wrap { height: 480px; }
+    }
+    @media (max-width: 620px) {
+      header { align-items: flex-start; flex-direction: column; }
+      .status-line { justify-content: flex-start; }
+      .metrics { grid-template-columns: 1fr; }
+      .bar-row { grid-template-columns: 82px 40px minmax(70px, 1fr) 70px; }
+    }
+  </style>
+</head>
+<body>
+<div class="shell">
+  <header>
+    <div class="brand">
+      <div>
+        <h1>Trade Claude Monitor</h1>
+        <small id="last-updated">loading</small>
+      </div>
+    </div>
+    <div class="status-line">
+      <span class="pill" id="market-pill">MARKET</span>
+      <span class="pill" id="mode-pill">BOT</span>
+      <span class="pill" id="db-pill">DB</span>
+    </div>
+  </header>
+
+  <main>
+    <div>
+      <section>
+        <div class="panel-head">
+          <h2>Live Chart</h2>
+          <div class="controls">
+            <select id="symbol-select" aria-label="Symbol">
+              {% for item in watchlist %}
+              <option value="{{ item.tv }}">{{ item.label }}</option>
+              {% endfor %}
+            </select>
+            <button class="icon-button" id="refresh-chart" title="Refresh chart">R</button>
+          </div>
+        </div>
+        <div class="chart-wrap">
+          <div id="tv-chart"></div>
+        </div>
+      </section>
+
+      <div class="grid-lower">
+        <section>
+          <div class="panel-head">
+            <h2>Symbol P&amp;L</h2>
+          </div>
+          <div class="bars" id="symbol-bars"></div>
+        </section>
+
+        <section>
+          <div class="panel-head">
+            <h2>Equity Curve</h2>
+          </div>
+          <div class="line-chart">
+            <svg id="equity-svg" viewBox="0 0 600 150" preserveAspectRatio="none"></svg>
+          </div>
+        </section>
+      </div>
+
+      <section style="margin-top:14px">
+        <div class="panel-head">
+          <h2>Recent Trades</h2>
+        </div>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>ID</th><th>Date</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Exit</th><th>Reason</th><th>P&amp;L</th><th>AI</th></tr>
+            </thead>
+            <tbody id="trade-body"></tbody>
+          </table>
+        </div>
+      </section>
+    </div>
+
+    <aside>
+      <div class="panel-head">
+        <h2>Bot Results</h2>
+      </div>
+      <div class="metrics">
+        <div class="metric"><label>Net P&amp;L</label><strong id="net-pnl">0.00</strong></div>
+        <div class="metric"><label>Gross P&amp;L</label><strong id="gross-pnl">0.00</strong></div>
+        <div class="metric"><label>Total Trades</label><strong id="total-trades">0</strong></div>
+        <div class="metric"><label>Open Trades</label><strong id="open-trades">0</strong></div>
+        <div class="metric"><label>Win Rate</label><strong id="win-rate">0%</strong></div>
+        <div class="metric"><label>Today P&amp;L</label><strong id="today-pnl">0.00</strong></div>
+        <div class="metric"><label>Best Trade</label><strong id="best-trade">0.00</strong></div>
+        <div class="metric"><label>Worst Trade</label><strong id="worst-trade">0.00</strong></div>
+      </div>
+
+      <section style="border-left:0;border-right:0;border-radius:0">
+        <div class="panel-head">
+          <h2>AI Source</h2>
+        </div>
+        <div class="table-scroll" style="max-height:180px">
+          <table>
+            <thead><tr><th>Source</th><th>Trades</th><th>Win%</th><th>P&amp;L</th></tr></thead>
+            <tbody id="source-body"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section style="border-left:0;border-right:0;border-radius:0">
+        <div class="panel-head">
+          <h2>Bot Log</h2>
+        </div>
+        <div class="log" id="log-box"></div>
+      </section>
+    </aside>
+  </main>
+</div>
+
+<script>
+const fmt = new Intl.NumberFormat('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const intFmt = new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 });
+let activeSymbol = document.getElementById('symbol-select').value;
+
+function money(value) {
+  const number = Number(value || 0);
+  return (number < 0 ? '-' : '') + 'INR ' + fmt.format(Math.abs(number));
+}
+
+function colorClass(value) {
+  return Number(value || 0) < 0 ? 'bad-text' : 'good-text';
+}
+
+function setMetric(id, value, isMoney = true) {
+  const el = document.getElementById(id);
+  el.textContent = isMoney ? money(value) : value;
+  if (isMoney) el.className = colorClass(value);
+}
+
+function clearNode(node) {
+  while (node.firstChild) node.removeChild(node.firstChild);
+}
+
+function loadTradingView(symbol) {
+  activeSymbol = symbol;
+  const root = document.getElementById('tv-chart');
+  clearNode(root);
+
+  const container = document.createElement('div');
+  container.className = 'tradingview-widget-container';
+  container.style.height = '100%';
+  container.style.width = '100%';
+
+  const widget = document.createElement('div');
+  widget.className = 'tradingview-widget-container__widget';
+  widget.style.height = '100%';
+  widget.style.width = '100%';
+  container.appendChild(widget);
+
+  const script = document.createElement('script');
+  script.src = 'https://s3.tradingview.com/external-embedding/embed-widget-advanced-chart.js';
+  script.async = true;
+  script.type = 'text/javascript';
+  script.text = JSON.stringify({
+    autosize: true,
+    symbol,
+    interval: '5',
+    timezone: 'Asia/Kolkata',
+    theme: 'dark',
+    style: '1',
+    locale: 'in',
+    enable_publishing: false,
+    allow_symbol_change: true,
+    calendar: false,
+    hide_side_toolbar: false,
+    support_host: 'https://www.tradingview.com'
+  });
+  container.appendChild(script);
+  root.appendChild(container);
+}
+
+function drawBars(rows) {
+  const box = document.getElementById('symbol-bars');
+  clearNode(box);
+  if (!rows.length) {
+    box.innerHTML = '<div class="muted mono">No trades recorded.</div>';
+    return;
+  }
+  const maxAbs = Math.max(...rows.map(r => Math.abs(Number(r.pnl || 0))), 1);
+  rows.forEach(row => {
+    const wrap = document.createElement('div');
+    wrap.className = 'bar-row';
+    const width = Math.max(2, Math.round(Math.abs(row.pnl) / maxAbs * 100));
+    wrap.innerHTML = `
+      <div class="mono">${row.symbol}</div>
+      <div class="muted">${row.trades}</div>
+      <div class="bar-track"><div class="bar-fill ${row.pnl < 0 ? 'loss' : ''}" style="width:${width}%"></div></div>
+      <div class="${colorClass(row.pnl)} mono">${money(row.pnl).replace('INR ', '')}</div>
+    `;
+    box.appendChild(wrap);
+  });
+}
+
+function drawEquity(rows) {
+  const svg = document.getElementById('equity-svg');
+  clearNode(svg);
+  if (!rows.length) return;
+  const values = rows.map(r => Number(r.equity || 0));
+  const min = Math.min(...values, 0);
+  const max = Math.max(...values, 1);
+  const range = max - min || 1;
+  const points = values.map((v, i) => {
+    const x = rows.length === 1 ? 0 : i / (rows.length - 1) * 600;
+    const y = 132 - ((v - min) / range * 114);
+    return `${x.toFixed(1)},${y.toFixed(1)}`;
+  }).join(' ');
+  const zeroY = 132 - ((0 - min) / range * 114);
+  svg.innerHTML = `
+    <line x1="0" y1="${zeroY}" x2="600" y2="${zeroY}" stroke="#30363d" stroke-width="1" />
+    <polyline points="${points}" fill="none" stroke="#2fbf71" stroke-width="3" vector-effect="non-scaling-stroke" />
+    <circle cx="0" cy="${points.split(' ')[0].split(',')[1]}" r="3" fill="#4fb3d8" />
+  `;
+}
+
+function renderTrades(rows) {
+  const body = document.getElementById('trade-body');
+  clearNode(body);
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${row.id}</td><td>${row.date || ''}</td><td>${row.symbol || ''}</td><td>${row.side || ''}</td>
+      <td>${row.qty || 0}</td><td>${money(row.price).replace('INR ', '')}</td>
+      <td>${row.close_price === null ? 'OPEN' : money(row.close_price).replace('INR ', '')}</td>
+      <td>${row.reason || 'OPEN'}</td><td class="${colorClass(row.pnl)}">${money(row.pnl).replace('INR ', '')}</td>
+      <td>${row.ai_decision || ''}</td>
+    `;
+    body.appendChild(tr);
+  });
+}
+
+function renderSources(rows) {
+  const body = document.getElementById('source-body');
+  clearNode(body);
+  rows.forEach(row => {
+    const tr = document.createElement('tr');
+    tr.innerHTML = `<td>${row.source}</td><td>${row.trades}</td><td>${row.win_rate}%</td><td class="${colorClass(row.pnl)}">${money(row.pnl).replace('INR ', '')}</td>`;
+    body.appendChild(tr);
+  });
+}
+
+function renderStatus(data) {
+  const market = document.getElementById('market-pill');
+  market.textContent = `MARKET ${data.market.label}`;
+  market.className = `pill ${data.market.is_open ? 'good' : 'bad'}`;
+
+  const mode = document.getElementById('mode-pill');
+  const paper = data.bot.paper_trade === true;
+  mode.textContent = paper ? 'PAPER MODE' : 'LIVE MODE';
+  mode.className = `pill ${paper ? 'good' : 'bad'}`;
+
+  const db = document.getElementById('db-pill');
+  db.textContent = data.summary.total_trades > 0 ? 'JOURNAL READY' : 'NO JOURNAL DATA';
+  db.className = `pill ${data.summary.total_trades > 0 ? 'good' : ''}`;
+}
+
+async function refresh() {
+  const res = await fetch('/api/overview', { cache: 'no-store' });
+  const data = await res.json();
+  const s = data.summary;
+
+  setMetric('net-pnl', s.net_pnl);
+  setMetric('gross-pnl', s.gross_pnl);
+  setMetric('total-trades', intFmt.format(s.total_trades), false);
+  setMetric('open-trades', intFmt.format(s.open_trades), false);
+  setMetric('win-rate', `${s.win_rate}%`, false);
+  setMetric('today-pnl', s.today_pnl);
+  setMetric('best-trade', s.best_trade);
+  setMetric('worst-trade', s.worst_trade);
+
+  drawBars(data.symbols || []);
+  drawEquity(data.daily || []);
+  renderTrades(data.recent_trades || []);
+  renderSources(data.sources || []);
+  renderStatus(data);
+
+  document.getElementById('log-box').textContent = (data.logs || []).join('\n');
+  document.getElementById('last-updated').textContent = data.market.time;
+}
+
+document.getElementById('symbol-select').addEventListener('change', event => loadTradingView(event.target.value));
+document.getElementById('refresh-chart').addEventListener('click', () => loadTradingView(activeSymbol));
+
+loadTradingView(activeSymbol);
+refresh();
+setInterval(refresh, 5000);
+</script>
+</body>
+</html>

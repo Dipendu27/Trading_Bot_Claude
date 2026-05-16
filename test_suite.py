@@ -58,7 +58,7 @@ def print_info(msg):
 def test_file_existence():
     print_header("TEST 1: File Existence & Structure")
     
-    required_files = ['bot.py', 'backtest.py', 'journal.py', 'dashboard.py', 'setup.py']
+    required_files = ['bot.py', 'backtest.py', 'journal.py', 'dashboard.py', 'web_dashboard.py', 'setup.py']
     all_exist = True
     
     for fname in required_files:
@@ -79,7 +79,7 @@ def test_python_syntax():
     print_header("TEST 2: Python Syntax Validation")
     
     import py_compile
-    files = ['bot.py', 'backtest.py', 'journal.py', 'dashboard.py', 'setup.py']
+    files = ['bot.py', 'backtest.py', 'journal.py', 'dashboard.py', 'web_dashboard.py', 'setup.py']
     all_valid = True
     
     for fname in files:
@@ -107,6 +107,7 @@ def test_import_dependencies():
         'schedule': 'Task scheduling',
         'requests': 'HTTP requests',
         'rich': 'Terminal UI',
+        'flask': 'Web dashboard',
     }
     
     all_available = True
@@ -119,7 +120,7 @@ def test_import_dependencies():
             all_available = False
     
     if not all_available:
-        print_warning("Run: pip install kiteconnect anthropic pandas numpy schedule requests rich")
+        print_warning("Run: pip install -r requirements.txt")
     
     return all_available
 
@@ -323,7 +324,39 @@ def test_code_quality():
     return True
 
 # ═══════════════════════════════════════════════════════════
-# TEST 9: Comprehensive Summary Report
+# TEST 9: Web Dashboard Smoke Test
+# ═══════════════════════════════════════════════════════════
+def test_web_dashboard():
+    print_header("TEST 9: Web Dashboard Smoke Test")
+
+    try:
+        import web_dashboard
+
+        client = web_dashboard.app.test_client()
+        page = client.get("/")
+        health = client.get("/api/health")
+        overview = client.get("/api/overview")
+
+        if page.status_code != 200:
+            print_error(f"Dashboard page failed: HTTP {page.status_code}")
+            return False
+        if health.status_code != 200 or not health.get_json().get("ok"):
+            print_error("Health API failed")
+            return False
+        if overview.status_code != 200 or "summary" not in overview.get_json():
+            print_error("Overview API failed")
+            return False
+
+        print_success("Dashboard page renders")
+        print_success("Health API responds")
+        print_success("Overview API responds")
+        return True
+    except Exception as e:
+        print_error(f"Web dashboard smoke test failed: {e}")
+        return False
+
+# ═══════════════════════════════════════════════════════════
+# TEST 10: Comprehensive Summary Report
 # ═══════════════════════════════════════════════════════════
 def generate_summary_report(results):
     print_header("COMPREHENSIVE SUMMARY REPORT")
@@ -337,6 +370,7 @@ def generate_summary_report(results):
         ('Strategy Logic', results[5]),
         ('Journal Analysis', results[6]),
         ('Code Quality', results[7]),
+        ('Web Dashboard', results[8]),
     ]
     
     passed = sum(1 for _, result in tests if result)
@@ -363,7 +397,7 @@ def generate_summary_report(results):
         print(f"CRITICAL ✗{RESET}")
 
 # ═══════════════════════════════════════════════════════════
-# TEST 10: P&L Analysis Report
+# TEST 11: P&L Analysis Report
 # ═══════════════════════════════════════════════════════════
 def generate_pnl_report():
     print_header("P&L ANALYSIS REPORT")
@@ -468,6 +502,7 @@ def main():
     results.append(test_strategy_logic())
     results.append(test_journal_analysis())
     results.append(test_code_quality())
+    results.append(test_web_dashboard())
     
     # Generate reports
     generate_summary_report(results)
@@ -488,6 +523,7 @@ def main():
 3. LIVE TRADING:
    • python bot.py          (main trader, run daily at 9:00 AM)
    • python dashboard.py    (in another terminal, optional)
+   • python web_dashboard.py (browser monitor, optional)
 
 4. MONITORING:
    • python journal.py      (view today's trades)

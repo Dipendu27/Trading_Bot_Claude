@@ -13,6 +13,7 @@ Claude AI to validate ambiguous setups before placing orders.
 | `bot.py` | Main bot — run this every morning |
 | `journal.py` | SQLite trade journal + P&L tracker |
 | `dashboard.py` | Live terminal UI (run in second terminal) |
+| `web_dashboard.py` | Browser monitor with TradingView chart widget |
 | `backtest.py` | Test strategy on historical Kite data |
 | `setup.py` | First-time setup wizard |
 
@@ -30,12 +31,20 @@ python bot.py
 # 3. Optional: live dashboard in another terminal
 python dashboard.py
 
-# 4. View today's trades
+# 4. Optional: browser monitor
+python web_dashboard.py
+
+# 5. View today's trades
 python journal.py
 
-# 5. Backtest before going live
+# 6. Backtest before going live
 python backtest.py --symbol RELIANCE --days 30
 ```
+
+Open the browser monitor at `http://127.0.0.1:5050`. It reads local
+`trades.db` and `bot.log` at runtime and embeds TradingView charts for the
+configured watchlist. Runtime databases, logs, CSV exports, and generated
+reports are ignored by Git.
 
 ---
 
