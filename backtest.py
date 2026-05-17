@@ -5,7 +5,7 @@ Mirrors bot.py v2 signal logic exactly:
   • ADX + Supertrend + VWAP bands
   • Regime detection (BULL / BEAR / SIDEWAYS) per bar
   • Regime-specific SL, target, score thresholds
-  • Scaled exit (50% at 1:1 R:R)
+  • Scaled exit (30% at 1:1 R:R)
   • Black-Scholes option pricing with real IV from Kite
 
 Usage:
@@ -42,33 +42,33 @@ BT: Dict[str, Any] = {
     "fake_break_ratio": 0.3,
     "tf_agree_score":   5,
     "tf_single_score":  4,
-    "capital":          50000,
-    "risk_per_trade":   0.02,
-    "max_lots":         3,
+    "capital":          25000,
+    "risk_per_trade":   0.06,
+    "max_lots":         5,
     "lot_sizes": {"NIFTY 50": 25, "NIFTY BANK": 15},
     "scale_exit":         True,
     "scale_exit_ratio":   0.3,
     "risk_free_rate":     0.068,
     "iv_fallback":        0.15,
     "bid_ask_spread_pct": 0.02,
-    "min_premium":        20.0,
-    "max_premium":        300.0,
+    "min_premium":        15.0,
+    "max_premium":        450.0,
     "squareoff_hour":     15, "squareoff_minute": 10,
     "no_new_trades_after_hour": 14, "no_new_trades_after_minute": 45,
 }
 
 REGIME_PARAMS: Dict[str, Dict[str, Any]] = {
     "BULL": {
-        "sl_pct": 0.28, "target_pct": 1.20, "trail_trigger_pct": 0.30,
+        "sl_pct": 0.25, "target_pct": 1.20, "trail_trigger_pct": 0.30,
         "preferred_dir": "CE", "min_adx": 20, "score_threshold": 4,
     },
     "BEAR": {
-        "sl_pct": 0.28, "target_pct": 1.20, "trail_trigger_pct": 0.30,
+        "sl_pct": 0.25, "target_pct": 1.20, "trail_trigger_pct": 0.30,
         "preferred_dir": "PE", "min_adx": 20, "score_threshold": 4,
     },
     "SIDEWAYS": {
-        "sl_pct": 0.20, "target_pct": 0.55, "trail_trigger_pct": 0.15,
-        "preferred_dir": "BOTH", "min_adx": 15, "score_threshold": 6,
+        "sl_pct": 0.15, "target_pct": 0.55, "trail_trigger_pct": 0.15,
+        "preferred_dir": "BOTH", "min_adx": 15, "score_threshold": 5,
     },
 }
 
@@ -394,10 +394,17 @@ def run_backtest(df1: pd.DataFrame, df5: pd.DataFrame, df15: pd.DataFrame,
             p = p * (1 - BT["bid_ask_spread_pct"] / 2)   # exit: receive bid
         return p
 
-    def calc_lots(prem):
-        cost = prem * lot_size
-        return max(1, min(int(BT["capital"] * BT["risk_per_trade"] / cost) if cost > 0 else 1,
-                          BT["max_lots"]))
+    def calc_lots(prem, regime):
+        if prem <= 0 or lot_size <= 0:
+            return 0
+        rp = REGIME_PARAMS[regime]
+        loss_per_lot = prem * max(float(rp["sl_pct"]), 0.01) * lot_size
+        risk_based_lots = int((BT["capital"] * BT["risk_per_trade"]) / loss_per_lot)
+        capital_guard_lots = int((BT["capital"] * 0.15) / (prem * lot_size))
+        if risk_based_lots < 1 or capital_guard_lots < 1:
+            return 0
+        tier_cap = BT["max_lots"] if regime in ("BULL", "BEAR") else max(1, BT["max_lots"] // 2 + 1)
+        return max(0, min(risk_based_lots, capital_guard_lots, tier_cap, BT["max_lots"]))
 
     rows1  = list(df1.iterrows())
 
@@ -493,7 +500,9 @@ def run_backtest(df1: pd.DataFrame, df5: pd.DataFrame, df15: pd.DataFrame,
         fill_p = get_premium(spot, ts, direction, raw=False)
         if not (BT["min_premium"] <= fill_p <= BT["max_premium"]): continue
 
-        lots  = calc_lots(fill_p)
+        lots  = calc_lots(fill_p, regime)
+        if lots < 1:
+            continue
         qty   = lots * lot_size
         sl    = round(fill_p * (1 - rp["sl_pct"]),     2)
         target= round(fill_p * (1 + rp["target_pct"]), 2)

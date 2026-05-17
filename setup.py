@@ -5,7 +5,7 @@ Run once before anything else:
     python setup.py
 """
 
-import os, subprocess, sys
+import os, re, subprocess, sys
 
 print("""
 ╔══════════════════════════════════════════════════════╗
@@ -26,7 +26,7 @@ print("Step 2 — Enter your credentials (written into bot.py locally)\n")
 zerodha_key    = input("  Zerodha API Key      : ").strip()
 zerodha_secret = input("  Zerodha API Secret   : ").strip()
 anthropic_key  = input("  Anthropic API Key    : ").strip()
-capital_str    = input("  Capital per day ₹    (default 50000): ").strip() or "50000"
+capital_str    = input("  Capital per day ₹    (default 25000): ").strip() or "25000"
 
 # ── Step 3: Patch bot.py ──────────────────────────────
 bot_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "bot.py")
@@ -38,7 +38,7 @@ src = open(bot_path).read()
 src = src.replace("YOUR_ZERODHA_API_KEY",    zerodha_key)
 src = src.replace("YOUR_ZERODHA_API_SECRET", zerodha_secret)
 src = src.replace("YOUR_ANTHROPIC_API_KEY",  anthropic_key)
-src = src.replace('"capital":           50000', f'"capital":           {capital_str}')
+src = re.sub(r'"capital":\s*\d+', f'"capital":        {capital_str}', src, count=1)
 open(bot_path, "w").write(src)
 print("\n  ✅ bot.py updated with your credentials.\n")
 
@@ -73,7 +73,7 @@ print("""
 ║  Run the bot (PAPER_TRADE=True by default):          ║
 ║    python bot.py                                     ║
 ║                                                      ║
-║  Browser dashboard:                                  ║
+║  Live dashboard (second terminal):                   ║
 ║    python web_dashboard.py                           ║
 ║                                                      ║
 ║  View today's trades:                                ║

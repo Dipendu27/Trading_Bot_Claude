@@ -117,13 +117,13 @@ Rejects entries when ≥ 2 of:
 - OBV diverging from price
 
 **Risk Management:**
-- Regime-aware option-premium stop-loss: 28% in trends, 20% in sideways markets
+- Regime-aware option-premium stop-loss: 25% in trends, 15% in sideways markets
 - Higher reward targets: 120% in BULL/BEAR trends, 55% in SIDEWAYS breakouts
 - Scaled exit now books only 30% at 1:1 R:R and lets the remaining lots run
 - Trailing SL starts after 30% premium move in trends and 15% in sideways markets
 - Hard 3:15 PM square-off for all positions
-- Max 3 lots per trade
-- 2% capital at risk per trade, position sized by option premium and lot size
+- Max 5 lots per trade, capped by account exposure
+- 6% capital at risk per trade on a ₹25,000 account, sized by stop-loss risk and lot size
 
 ---
 
@@ -162,10 +162,10 @@ Mistral handles about 80% of Claude's quality for this use case.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `capital` | 50000 | ₹ deployed per day |
-| `max_lots` | 3 | Max option lots per trade |
-| `risk_per_trade` | 2% | Capital risked per trade |
-| `sl_pct` | 20-28% | Regime-aware option-premium stop-loss |
+| `capital` | 25000 | ₹ deployed per day |
+| `max_lots` | 5 | Max option lots per trade |
+| `risk_per_trade` | 6% | Capital risked per trade |
+| `sl_pct` | 15-25% | Regime-aware option-premium stop-loss |
 | `target_pct` | 55-120% | Regime-aware option-premium target |
 | `scale_exit_ratio` | 30% | Portion booked at first 1:1 target |
 | `trail_sl` | True | Enable trailing stop |
