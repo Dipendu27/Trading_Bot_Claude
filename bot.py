@@ -57,9 +57,9 @@ PAPER_TRADE: bool = True   # ← set False only when ready for real money
 # ══════════════════════════════════════════════════════════
 CFG: Dict[str, Any] = {
     # ── Credentials (filled by setup.py) ─────────────────
-    "api_key":       "YOUR_ZERODHA_API_KEY",
-    "api_secret":    "YOUR_ZERODHA_API_SECRET",
-    "anthropic_key": "YOUR_ANTHROPIC_API_KEY",
+    "api_key":       "yes",
+    "api_secret":    "yes",
+    "anthropic_key": "yes",
     "claude_model":  "claude-sonnet-4-6",
 
     # ── Local LLM fallback ────────────────────────────────
@@ -89,13 +89,13 @@ CFG: Dict[str, Any] = {
     # ── Regime-aware SL/Target ────────────────────────────
     # These are overridden dynamically per regime (see REGIME_PARAMS)
     "sl_pct":            0.30,
-    "target_pct":        0.60,
+    "target_pct":        1.00,
     "trail_sl":          True,
     "trail_trigger_pct": 0.20,
 
     # ── Scaled exit ───────────────────────────────────────
     "scale_exit":         True,   # close 50% at 1:1 R:R, rest at target
-    "scale_exit_ratio":   0.5,    # fraction to close at 1:1
+    "scale_exit_ratio":   0.3,    # close only 30% at 1:1; let the rest run
 
     # ── Daily circuit-breaker ─────────────────────────────
     "max_daily_loss":      10000,  # ₹ — stop new trades for the day
@@ -143,8 +143,8 @@ CFG: Dict[str, Any] = {
 REGIME_PARAMS: Dict[str, Dict[str, Any]] = {
     "BULL": {
         "sl_pct":            0.28,   # slightly tighter SL — trend has momentum
-        "target_pct":        0.80,   # ride the trend further
-        "trail_trigger_pct": 0.25,   # let premium run before trailing
+        "target_pct":        1.20,   # higher trend target: +120% option premium
+        "trail_trigger_pct": 0.30,   # let premium run before trailing
         "otm_offset":        0,      # ATM CE
         "preferred_dir":     "CE",
         "min_adx":           20,
@@ -153,8 +153,8 @@ REGIME_PARAMS: Dict[str, Dict[str, Any]] = {
     },
     "BEAR": {
         "sl_pct":            0.28,
-        "target_pct":        0.80,
-        "trail_trigger_pct": 0.25,
+        "target_pct":        1.20,
+        "trail_trigger_pct": 0.30,
         "otm_offset":        0,      # ATM PE
         "preferred_dir":     "PE",
         "min_adx":           20,
@@ -163,8 +163,8 @@ REGIME_PARAMS: Dict[str, Dict[str, Any]] = {
     },
     "SIDEWAYS": {
         "sl_pct":            0.20,   # tight SL in chop
-        "target_pct":        0.35,   # quick profit, don't be greedy
-        "trail_trigger_pct": 0.10,
+        "target_pct":        0.55,   # higher breakout target, still below trend targets
+        "trail_trigger_pct": 0.15,
         "otm_offset":        0,
         "preferred_dir":     "BOTH", # trade breakouts in either direction
         "min_adx":           15,     # lower bar but needs breakout confirm
@@ -849,6 +849,18 @@ def calc_lots(premium: float, root: str) -> int:
         return 1
     return max(1, min(int(max_risk / (premium * lot_size)), CFG["max_lots"]))
 
+
+def scaled_exit_qty(pos: Dict[str, Any]) -> int:
+    """Return a lot-safe quantity for the first partial exit."""
+    lot_size = int(pos.get("lot_size") or CFG["lot_sizes"].get(pos.get("root", ""), 25))
+    lots = int(pos.get("lots") or max(1, pos.get("qty", 0) // lot_size))
+    if lots <= 1:
+        return 0
+    lots_to_exit = max(1, int(lots * CFG["scale_exit_ratio"]))
+    lots_to_exit = min(lots_to_exit, lots - 1)
+    return lots_to_exit * lot_size
+
+
 def place_buy(kite: KiteConnect, opt_sym: str, root: str,
               index_price: float, brain: str = "ALGO", regime: str = "SIDEWAYS"):
     global session_pnl, consecutive_losses, cooldown_until, daily_stopped
@@ -895,7 +907,7 @@ def place_buy(kite: KiteConnect, opt_sym: str, root: str,
         "qty": qty, "entry": premium, "sl": sl, "target": target,
         "scale_target": scale_target, "scaled_out": False,
         "peak": premium, "order_id": oid, "journal_id": jid,
-        "root": root, "lots": lots, "regime": regime,
+        "root": root, "lots": lots, "lot_size": lot_size, "regime": regime,
         "index_price_at_entry": index_price,
     }
 
@@ -951,6 +963,8 @@ def place_sell(kite: KiteConnect, opt_sym: str, reason: str = "signal",
     else:
         # Partial exit — update remaining qty
         open_positions[opt_sym]["qty"] -= sell_qty
+        if pos.get("lot_size"):
+            open_positions[opt_sym]["lots"] = max(0, open_positions[opt_sym]["qty"] // pos["lot_size"])
         open_positions[opt_sym]["scaled_out"] = True
         if "journal_id" in pos:
             journal.log_exit(pos["journal_id"], cur_prem, f"{reason}(partial)", pnl)
@@ -964,14 +978,18 @@ def check_positions(kite: KiteConnect):
             continue
         pct = (ltp - pos["entry"]) / pos["entry"]
 
-        # ── Scaled exit: close half at 1:1 ───────────────
+        # ── Scaled exit: book a smaller chunk at 1:1, let the rest run ──
         if (CFG["scale_exit"] and not pos["scaled_out"]
-                and ltp >= pos.get("scale_target", 1e9) and pos["qty"] > 1):
-            half_qty = max(1, pos["qty"] // 2)
-            place_sell(kite, sym, "scale-1:1", partial_qty=half_qty)
-            # Widen trail trigger after partial close
-            open_positions[sym]["trail_trigger_pct"] = pos.get("trail_trigger_pct", CFG["trail_trigger_pct"]) * 0.5
-            continue
+                and ltp >= pos.get("scale_target", 1e9)):
+            partial_qty = scaled_exit_qty(pos)
+            if not partial_qty:
+                open_positions[sym]["scaled_out"] = True
+                pos = open_positions[sym]
+            else:
+                place_sell(kite, sym, "scale-1:1", partial_qty=partial_qty)
+                # Widen trail trigger after partial close
+                open_positions[sym]["trail_trigger_pct"] = pos.get("trail_trigger_pct", CFG["trail_trigger_pct"]) * 0.5
+                continue
 
         # ── Trailing SL ───────────────────────────────────
         trig = pos.get("trail_trigger_pct", CFG["trail_trigger_pct"])
@@ -1178,7 +1196,7 @@ def main():
     log.info(f"  Capital       : ₹{CFG['capital']:,}")
     log.info(f"  Risk/trade    : {CFG['risk_per_trade']*100:.0f}%")
     log.info(f"  Max daily loss: ₹{CFG['max_daily_loss']:,}")
-    log.info(f"  Scaled exit   : {CFG['scale_exit']} (50% at 1:1 R:R)")
+    log.info(f"  Scaled exit   : {CFG['scale_exit']} ({CFG['scale_exit_ratio']*100:.0f}% at 1:1 R:R)")
     log.info(f"  Cooldown      : after {CFG['cooldown_after_loss']} consecutive losses")
     log.info("Press Ctrl+C to stop.\n")
 

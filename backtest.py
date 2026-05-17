@@ -47,7 +47,7 @@ BT: Dict[str, Any] = {
     "max_lots":         3,
     "lot_sizes": {"NIFTY 50": 25, "NIFTY BANK": 15},
     "scale_exit":         True,
-    "scale_exit_ratio":   0.5,
+    "scale_exit_ratio":   0.3,
     "risk_free_rate":     0.068,
     "iv_fallback":        0.15,
     "bid_ask_spread_pct": 0.02,
@@ -59,15 +59,15 @@ BT: Dict[str, Any] = {
 
 REGIME_PARAMS: Dict[str, Dict[str, Any]] = {
     "BULL": {
-        "sl_pct": 0.28, "target_pct": 0.80, "trail_trigger_pct": 0.25,
+        "sl_pct": 0.28, "target_pct": 1.20, "trail_trigger_pct": 0.30,
         "preferred_dir": "CE", "min_adx": 20, "score_threshold": 4,
     },
     "BEAR": {
-        "sl_pct": 0.28, "target_pct": 0.80, "trail_trigger_pct": 0.25,
+        "sl_pct": 0.28, "target_pct": 1.20, "trail_trigger_pct": 0.30,
         "preferred_dir": "PE", "min_adx": 20, "score_threshold": 4,
     },
     "SIDEWAYS": {
-        "sl_pct": 0.20, "target_pct": 0.35, "trail_trigger_pct": 0.10,
+        "sl_pct": 0.20, "target_pct": 0.55, "trail_trigger_pct": 0.15,
         "preferred_dir": "BOTH", "min_adx": 15, "score_threshold": 6,
     },
 }
@@ -436,17 +436,20 @@ def run_backtest(df1: pd.DataFrame, df5: pd.DataFrame, df15: pd.DataFrame,
             iv      = iv_ce if position["direction"] == "CE" else iv_pe
             cur_p   = bar_premium(spot, strike, ts, expiry, iv, position["direction"])
 
-            # Scaled exit at 1:1
+            # Scaled exit at 1:1: book a smaller lot-safe chunk, let the rest run.
             if (BT["scale_exit"] and not position.get("scaled_out")
                     and cur_p >= position.get("scale_target", 1e9)
-                    and position["qty"] >= lot_size * 2):
-                half_qty = position["qty"] // 2
-                partial_pnl = (cur_p - position["fill_price"]) * half_qty
+                    and position["lots"] > 1):
+                lots_to_exit = max(1, int(position["lots"] * BT["scale_exit_ratio"]))
+                lots_to_exit = min(lots_to_exit, position["lots"] - 1)
+                partial_qty = lots_to_exit * lot_size
+                partial_pnl = (cur_p - position["fill_price"]) * partial_qty
                 trades.append({**position, "exit_premium": cur_p, "exit_spot": spot,
                                "exit_time": ts, "reason": "scale-1:1",
-                               "pnl": partial_pnl, "qty": half_qty, "regime": regime})
+                               "pnl": partial_pnl, "qty": partial_qty, "regime": regime})
                 session_pnl += partial_pnl
-                position["qty"] -= half_qty
+                position["qty"] -= partial_qty
+                position["lots"] -= lots_to_exit
                 position["scaled_out"] = True
 
             trailing_stop(position, cur_p, rp["trail_trigger_pct"])

@@ -117,12 +117,13 @@ Rejects entries when ≥ 2 of:
 - OBV diverging from price
 
 **Risk Management:**
-- 1.2% stop-loss from entry
-- 2.7% target (2.25:1 reward:risk)
-- Trailing SL tightens to 0.84% after price moves up
-- Hard 3:10 PM square-off for all positions
-- Max 3 concurrent positions
-- 1.5% capital at risk per trade (position sized accordingly)
+- Regime-aware option-premium stop-loss: 28% in trends, 20% in sideways markets
+- Higher reward targets: 120% in BULL/BEAR trends, 55% in SIDEWAYS breakouts
+- Scaled exit now books only 30% at 1:1 R:R and lets the remaining lots run
+- Trailing SL starts after 30% premium move in trends and 15% in sideways markets
+- Hard 3:15 PM square-off for all positions
+- Max 3 lots per trade
+- 2% capital at risk per trade, position sized by option premium and lot size
 
 ---
 
@@ -161,16 +162,17 @@ Mistral handles about 80% of Claude's quality for this use case.
 
 | Key | Default | Description |
 |-----|---------|-------------|
-| `capital` | 25000 | ₹ deployed per day |
-| `max_positions` | 3 | Max simultaneous trades |
-| `risk_per_trade` | 1.5% | Capital risked per trade |
-| `sl_pct` | 1.2% | Stop-loss distance |
-| `target_pct` | 2.7% | Target distance |
+| `capital` | 50000 | ₹ deployed per day |
+| `max_lots` | 3 | Max option lots per trade |
+| `risk_per_trade` | 2% | Capital risked per trade |
+| `sl_pct` | 20-28% | Regime-aware option-premium stop-loss |
+| `target_pct` | 55-120% | Regime-aware option-premium target |
+| `scale_exit_ratio` | 30% | Portion booked at first 1:1 target |
 | `trail_sl` | True | Enable trailing stop |
-| `squareoff_time` | 15:10 | Hard exit time |
-| `claude_calls_per_min` | 4 | API rate limit |
-| `min_volume_ratio` | 1.3 | Volume spike threshold |
-| `fake_break_ratio` | 0.4 | Body/range threshold |
+| `squareoff_time` | 15:15 | Hard exit time |
+| `claude_calls_per_min` | 10 | API rate limit |
+| `min_volume_ratio` | 1.1 | Volume spike threshold |
+| `fake_break_ratio` | 0.3 | Body/range threshold |
 
 ---
 
